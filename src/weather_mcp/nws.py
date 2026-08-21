@@ -1,7 +1,9 @@
 import httpx
-from weather_mcp.models import Coordinates
+
 from weather_mcp.errors import ServiceUnavailableError
 from weather_mcp.http import get_with_retry
+from weather_mcp.models import Coordinates
+
 
 async def get_daily_forecast(client: httpx.AsyncClient, coordinates: Coordinates, days: int = 7) -> list[str]:
     """Fetches the forecast for the given coordinates from the NWS API."""

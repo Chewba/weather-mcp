@@ -1,8 +1,11 @@
-import httpx
 import asyncio
 import time
+
+import httpx
+
 from weather_mcp.config import MAX_RETRIES
 from weather_mcp.errors import ServiceUnavailableError
+
 TIME_BASE_RETRY = 0.5
 TIME_TO_NEXT_CALL = 1
 _lock: dict[str, asyncio.Lock] = {}
@@ -22,7 +25,7 @@ async def get_with_retry(client:httpx.AsyncClient, url:str, **kwargs) -> dict:
                 response = await client.get(url, **kwargs)
                 response.raise_for_status()
                 return response.json()
-            except (httpx.TimeoutException, httpx.TransportError) as e:
+            except (httpx.TimeoutException, httpx.TransportError):
                 await asyncio.sleep(TIME_BASE_RETRY * 2 ** attempt)
             except httpx.HTTPStatusError as e:
                 if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
