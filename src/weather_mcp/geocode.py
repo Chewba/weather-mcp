@@ -1,9 +1,11 @@
-import httpx
 import re
-from weather_mcp.config import USER_AGENT
-from weather_mcp.models import Coordinates
-from weather_mcp.errors import LocationNotFoundError, LocationAmbiguousError
+
+import httpx
+
+from weather_mcp.errors import LocationAmbiguousError, LocationNotFoundError
 from weather_mcp.http import get_with_retry
+from weather_mcp.models import Coordinates
+
 _LAT_LON_REGEX = re.compile(r"^[-+]?([1-8]?\d(\.\d+)?|90(\.0+)?),\s*[-+]?(180(\.0+)?|((1[0-7]\d)|([1-9]?\d))(\.\d+)?)$")
 _ZIP_REGEX = re.compile(r"^\d{5}(-\d{4})?$")
 
@@ -19,7 +21,7 @@ async def get_coordinates(client:httpx.AsyncClient, address: str) -> Coordinates
 
 async def _nominatim_call(client:httpx.AsyncClient, params: dict, origin_address:str) -> Coordinates:
     """Fetches the geographical coordinates for the given address using the Nominatim API."""
-    url = f"https://nominatim.openstreetmap.org/search"
+    url = "https://nominatim.openstreetmap.org/search"
     params = {
         **params,
         "format": "jsonv2",

@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, field_validator
 
+
 class Coordinates(BaseModel):
     """A model representing geographical coordinates."""
     lat: float = Field(ge=-90, le=90, description="Latitude of the location")

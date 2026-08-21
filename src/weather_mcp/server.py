@@ -1,13 +1,14 @@
-import httpx
-import asyncio
 
+import httpx
 from mcp.server.mcpserver import MCPServer
+
 mcp = MCPServer(name="weather", instructions="...")
 
-from weather_mcp.geocode import get_coordinates
-import weather_mcp.nws as nws
+from weather_mcp import nws
 from weather_mcp.config import USER_AGENT
 from weather_mcp.errors import WeatherMcpError
+from weather_mcp.geocode import get_coordinates
+
 
 @mcp.tool()
 async def get_daily_forecast(address: str, days: int = 3) -> str:
