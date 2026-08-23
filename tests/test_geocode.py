@@ -58,8 +58,16 @@ async def test_get_coordinates_no_results_raises_location_not_found(monkeypatch)
 async def test_get_coordinates_ambiguous_resolved_by_full_state_name(monkeypatch):
     async def fake_get_with_retry(client, url, **kwargs):
         return [
-            {"lat": "39.7817", "lon": "-89.6501", "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"}},
-            {"lat": "42.1015", "lon": "-72.5898", "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"}},
+            {
+                "lat": "39.7817",
+                "lon": "-89.6501",
+                "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"},
+            },
+            {
+                "lat": "42.1015",
+                "lon": "-72.5898",
+                "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"},
+            },
         ]
 
     monkeypatch.setattr("weather_mcp.geocode.get_with_retry", fake_get_with_retry)
@@ -74,8 +82,16 @@ async def test_get_coordinates_ambiguous_resolved_by_full_state_name(monkeypatch
 async def test_get_coordinates_ambiguous_resolved_by_state_abbreviation(monkeypatch):
     async def fake_get_with_retry(client, url, **kwargs):
         return [
-            {"lat": "39.7817", "lon": "-89.6501", "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"}},
-            {"lat": "42.1015", "lon": "-72.5898", "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"}},
+            {
+                "lat": "39.7817",
+                "lon": "-89.6501",
+                "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"},
+            },
+            {
+                "lat": "42.1015",
+                "lon": "-72.5898",
+                "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"},
+            },
         ]
 
     monkeypatch.setattr("weather_mcp.geocode.get_with_retry", fake_get_with_retry)
@@ -90,8 +106,16 @@ async def test_get_coordinates_ambiguous_resolved_by_state_abbreviation(monkeypa
 async def test_get_coordinates_ambiguous_without_match_raises_with_states(monkeypatch):
     async def fake_get_with_retry(client, url, **kwargs):
         return [
-            {"lat": "39.7817", "lon": "-89.6501", "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"}},
-            {"lat": "42.1015", "lon": "-72.5898", "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"}},
+            {
+                "lat": "39.7817",
+                "lon": "-89.6501",
+                "address": {"state": "Illinois", "ISO3166-2-lvl4": "US-IL"},
+            },
+            {
+                "lat": "42.1015",
+                "lon": "-72.5898",
+                "address": {"state": "Massachusetts", "ISO3166-2-lvl4": "US-MA"},
+            },
         ]
 
     monkeypatch.setattr("weather_mcp.geocode.get_with_retry", fake_get_with_retry)

@@ -11,7 +11,8 @@ TIME_TO_NEXT_CALL = 1
 _lock: dict[str, asyncio.Lock] = {}
 _next_call: dict[str, int] = {}
 
-async def get_with_retry(client:httpx.AsyncClient, url:str, **kwargs) -> dict:
+
+async def get_with_retry(client: httpx.AsyncClient, url: str, **kwargs) -> dict:
     """Fetches data from the given URL with retry logic."""
     site = url.split("/")[2]
     async with _lock.setdefault(site, asyncio.Lock()):
@@ -26,9 +27,16 @@ async def get_with_retry(client:httpx.AsyncClient, url:str, **kwargs) -> dict:
                 response.raise_for_status()
                 return response.json()
             except (httpx.TimeoutException, httpx.TransportError):
-                await asyncio.sleep(TIME_BASE_RETRY * 2 ** attempt)
+                await asyncio.sleep(TIME_BASE_RETRY * 2**attempt)
             except httpx.HTTPStatusError as e:
-                if 400 <= e.response.status_code < 500 and e.response.status_code != 429:
-                    raise ServiceUnavailableError(f"Client error occurred while trying to reach {url}: {e}")
-                await asyncio.sleep(TIME_BASE_RETRY * 2 ** attempt)
-        raise ServiceUnavailableError(f"Failed to fetch data from {url} after {MAX_RETRIES} attempts.")
+                if (
+                    400 <= e.response.status_code < 500
+                    and e.response.status_code != 429
+                ):
+                    raise ServiceUnavailableError(
+                        f"Client error occurred while trying to reach {url}: {e}"
+                    )
+                await asyncio.sleep(TIME_BASE_RETRY * 2**attempt)
+        raise ServiceUnavailableError(
+            f"Failed to fetch data from {url} after {MAX_RETRIES} attempts."
+        )
