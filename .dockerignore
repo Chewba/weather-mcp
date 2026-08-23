@@ -1,0 +1,10 @@
+.git
+.github
+.venv
+__pycache__
+*.py[oc]
+.pytest_cache
+.ruff_cache
+tests/eval/__pycache__
+Dockerfile
+.dockerignore
