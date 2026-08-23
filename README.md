@@ -26,8 +26,6 @@ Six tools, all accepting a plain-text US city/state or ZIP code:
 uv sync
 ```
 
-Set `USER_AGENT` in `src/weather_mcp/config.py` to a real contact string before making heavy use of this against Nominatim — see Known limitations below.
-
 ## Running the server
 
 ```
@@ -35,6 +33,27 @@ uv run weather-mcp
 ```
 
 Registered as the `weather-mcp` console script (see `pyproject.toml`), speaking MCP over stdio.
+
+## Running with Docker
+
+A multi-stage `Dockerfile` is included (`uv`-based builder stage, slim non-root runtime stage). **Not yet verified with a real build** — Docker isn't available in the environment this was developed in, so treat it as reviewed-but-untested until someone actually runs it.
+
+```
+docker build -t weather-mcp .
+```
+
+Since this server speaks MCP over stdio, it's meant to be run interactively by an MCP client, not left running in the background — `docker run -d` would just see an immediately-closed stdin and exit. To point an MCP client (e.g. Claude Desktop's config) at the container instead of a local `uv run weather-mcp`, use something like:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "weather-mcp"]
+    }
+  }
+}
+```
 
 ## Testing
 
@@ -60,5 +79,4 @@ Highlights from `FINDINGS.md`: the eval process caught several real server bugs 
 
 - **US locations only** — bounded by NWS's own coverage; a non-USA address gets no useful answer.
 - **Forecast horizon caps at 7 days** regardless of what's requested — this is an NWS API limit, not something this server can extend.
-- **`USER_AGENT` is still a placeholder** in `config.py`. Nominatim's usage policy actively rejects generic-looking user agents; this should be a real contact string before sustained use.
-- **`http.py`'s retry/backoff logic has no dedicated test coverage yet** — `geocode.py` and `nws.py` do.
+- **The Dockerfile hasn't been verified with a real build** — see "Running with Docker" above.
