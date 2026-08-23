@@ -325,7 +325,14 @@ def judge_api(
             messages=[{"role": "user", "content": judge_prompt}],
         )
         text = "".join(block.text for block in response.content if block.type == "text")
-        scores.append(parse_judge_score(text))
+        try:
+            scores.append(parse_judge_score(text))
+        except ValueError:
+            block_types = [block.type for block in response.content]
+            raise ValueError(
+                f"Judge response had no usable score. stop_reason={response.stop_reason!r}, "
+                f"content block types={block_types!r}, prompt length={len(judge_prompt)} chars"
+            ) from None
         cost += estimate_cost_usd(
             judge_model, response.usage.input_tokens, response.usage.output_tokens
         )

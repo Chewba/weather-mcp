@@ -1,9 +1,8 @@
 # weather-mcp Eval Harness: Methodology & Findings
 
-Status: first draft, covers work through the `run_eval.py` unification (headless +
-API backends) and the 16-question `questions.py` dataset. Update as more runs
-happen, especially once the `api` backend gets a live run against
-`ANTHROPIC_API_KEY` (not yet verified live -- see "Open items" below).
+Status: covers work through the `run_eval.py` unification (headless + API
+backends, both now verified live) and the 16-question `questions.py` dataset.
+Update as more runs happen.
 
 ## What this harness measures
 
@@ -318,12 +317,40 @@ This run also caught a real harness bug along the way: the first attempt
 crashed partway through on a judge response of `**7**` (markdown-wrapped)
 instead of a bare integer -- see "LLM judge variance" above for the fix.
 
+## Headless vs. direct API: a real comparison
+
+The `api` backend was run live for the first time against all 16 questions
+(Haiku under test, Sonnet judging, 3 samples each) -- same models as an
+earlier headless run, letting the two be compared directly:
+
+| | Headless (informational) | Direct API (real, billed) |
+|---|---|---|
+| Model-under-test cost/question | $0.0210 | **$0.0043** |
+| Avg `tool_score` | 9.5 | 10.4 |
+| Avg `quality_score` | 7.0 | 7.9 |
+
+The real API cost came in at roughly **1/5th** of the headless backend's own
+cost estimate for equivalent work. This isn't the headless backend being
+"wrong" about its own cost -- it's honestly pricing what it actually does,
+which includes a full Claude Code agent harness (system prompt, the
+`ToolSearch` deferred-tool-loading round-trip) that a minimal, purpose-built
+API integration doesn't carry. The practical lesson: headless cost figures
+describe the cost of running this eval *through Claude Code*, not the cost of
+running this tool-selection task through the API in general -- don't treat
+one as a proxy for the other.
+
+The zero-call "declined" strategy (Atlantis/Springfield/London) produced
+identical behavior on both backends -- `tool_calls: []`, `tool_score: 10` in
+both cases -- good confirmation that the grading design isn't an artifact of
+one particular way of invoking the model. One transient failure occurred on
+the first live API attempt (a judge response with no parseable score,
+`ValueError: Judge response contained no integer: ''`) that didn't reproduce
+on retry; `judge_api` now wraps parse failures with `stop_reason` and content
+block types for diagnosis if it recurs (see "LLM judge variance" above for
+the similar markdown-wrapping fix this mirrors).
+
 ## Open items
 
-- The `api` backend is implemented (multi-turn tool loop, cost from real token
-  usage) but has not yet been run live -- no `ANTHROPIC_API_KEY` configured in
-  this environment. Needs a real run before headless-vs-API cost/quality
-  comparisons can be reported.
 - The `PRICING_PER_MTOK_USD` table in `run_eval.py` is a manually maintained
   snapshot and should be checked against current published pricing before any
   cost comparison is treated as final.
