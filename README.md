@@ -36,7 +36,7 @@ Registered as the `weather-mcp` console script (see `pyproject.toml`), speaking 
 
 ## Running with Docker
 
-A multi-stage `Dockerfile` is included (`uv`-based builder stage, slim non-root runtime stage). **Not yet verified with a real build** — Docker isn't available in the environment this was developed in, so treat it as reviewed-but-untested until someone actually runs it.
+A multi-stage `Dockerfile` is included (`uv`-based builder stage, slim non-root runtime stage). **Build Verified** — docker build completes cleanly and the entrypoint starts and exits 0 with no traceback.
 
 ```
 docker build -t weather-mcp .
@@ -79,4 +79,3 @@ Highlights from `FINDINGS.md`: the eval process caught several real server bugs 
 
 - **US locations only** — bounded by NWS's own coverage; a non-USA address gets no useful answer.
 - **Forecast horizon caps at 7 days** regardless of what's requested — this is an NWS API limit, not something this server can extend.
-- **The Dockerfile hasn't been verified with a real build** — see "Running with Docker" above.
