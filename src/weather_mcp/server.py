@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 import httpx
 from mcp.server.mcpserver import MCPServer
@@ -9,6 +10,9 @@ from weather_mcp import nws
 from weather_mcp.config import USER_AGENT
 from weather_mcp.errors import WeatherMcpError
 from weather_mcp.geocode import get_coordinates
+from weather_mcp.rag.ingest import ingest_discussion
+
+logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
@@ -50,9 +54,16 @@ async def get_weather_discussion(address: str, count: int = 1) -> str:
         try:
             coordinates = await get_coordinates(client, address)
             discussions = await nws.get_weather_discussion(client, coordinates, count)
-            return "\n".join(discussions)
         except WeatherMcpError as e:
             return str(e)
+        if not discussions:
+            return f"No discussions found for {address}"
+        for discussion in discussions:
+            try:
+                await ingest_discussion(discussion, discussion["issuingOffice"])
+            except Exception:
+                logger.exception("Failed to ingest weather discussion %s", discussion.get("@id"))
+        return "\n".join(discussion["productText"] for discussion in discussions)
 
 
 @mcp.tool()
