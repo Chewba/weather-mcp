@@ -67,8 +67,8 @@ async def get_active_alerts(
 
 async def get_weather_discussion(
     client: httpx.AsyncClient, coordinates: Coordinates, count: int = 1
-) -> list[str]:
-    """Fetches the weather discussions for the given gridId from the NWS API."""
+) -> list[dict]:
+    """Fetches the weather discussions for the given gridId from the NWS API. Returns the full product data (not just the text) so callers can both read and ingest it."""
     point_data = await get_point_data(client, coordinates)
     grid_id = point_data.get("properties", {}).get("gridId")
     if not grid_id:
@@ -78,12 +78,12 @@ async def get_weather_discussion(
     discussions = discussions.get("@graph", [])
     discussions_count = min(count, len(discussions))
     if discussions_count == 0:
-        return [f"No discussions found for {url}"]
+        return []
     discussions = discussions[:discussions_count]
     data = []
     for discussion in discussions:
         dis_data = await get_weather_data(client, discussion["@id"])
-        data.append(dis_data["productText"])
+        data.append(dis_data)
     return data
 
 
@@ -139,6 +139,10 @@ async def get_station_weather(client: httpx.AsyncClient, url: str) -> dict:
         weather["description"] = weather_data["properties"]["textDescription"]
     return weather
 
+async def get_office_data(client:httpx.AsyncClient, office_id) -> dict:
+    url = f"https://api.weather.gov/offices/{office_id}"
+    response = await get_weather_data(client, url)
+    return response
 
 async def get_weather_data(client: httpx.AsyncClient, url: str, **kwargs) -> dict:
     """Fetches the weather data for the given coordinates from the NWS API."""
