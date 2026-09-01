@@ -55,6 +55,24 @@ Since this server speaks MCP over stdio, it's meant to be run interactively by a
 }
 ```
 
+## RAG extension (in progress)
+
+A retrieval layer is being added on top of the existing tools, backed by Postgres + `pgvector`, so questions like "why did the forecast change" can be answered by retrieving relevant historical forecaster discussions, not just the current one.
+
+Current state:
+- **`docker-compose.yml`** — runs `pgvector/pgvector:pg16` locally, with a bind-mounted `pgdata/` volume (gitignored) for persistence.
+- **`db/schema.sql`** — auto-runs on first container start via `docker-entrypoint-initdb.d`. Defines `weather_offices`, `weather_discussion_products` (raw AFD text, one row per downloaded product), and `weather_discussion_chunks` (semantic chunks with 384-dim embeddings and an HNSW cosine-similarity index). Both product and chunk rows carry a `source` (`golden_fixture` vs `live_capture`) so evals can run against a frozen fixture set or against real captured data.
+
+To bring the DB up locally:
+
+```
+docker compose up -d
+docker compose ps                 # wait for "healthy"
+docker exec -it weather-mcp-db-1 psql -U weather-mcp-user -d weather-mcp -c "\dt"
+```
+
+Not yet built: a seed script to load a checked-in golden fixture into the DB, the two new retrieval-facing MCP tools (`search_forecast_history`, `explain_forecast_reasoning`), and the corresponding `eval-strict`/`eval-with-drift` extension to the eval harness below.
+
 ## Testing
 
 ```
