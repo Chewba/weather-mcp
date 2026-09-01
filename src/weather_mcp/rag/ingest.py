@@ -1,8 +1,20 @@
-import asyncpg, httpx, datetime
-from weather_mcp.rag.db import get_pool, upsert_office, get_office, get_discussion, upsert_discussion, upsert_discussion_chunk, get_discussion_chunk
-import weather_mcp.nws as nws
-from weather_mcp.rag.chunking import parse_chunks
+import datetime
+
+import asyncpg
+import httpx
+
+from weather_mcp import nws
 from weather_mcp.config import USER_AGENT
+from weather_mcp.rag.chunking import parse_chunks
+from weather_mcp.rag.db import (
+    get_discussion,
+    get_office,
+    get_pool,
+    upsert_discussion,
+    upsert_discussion_chunk,
+    upsert_office,
+)
+
 
 def _parse_afd_feed(raw_text:dict) -> dict:
     response = {}
@@ -24,7 +36,6 @@ async def ingest_discussion(raw_text:dict, office_id:str, source:str = "live_cap
     discussion_data['product_id'] = await set_discussion(pool, discussion_data)
     discussion_data = parse_chunks(discussion_data, office_data)
     await upsert_discussion_chunk(pool, discussion_data)
-    pass
 
 
 async def get_office_nws(office_id:str) -> dict:
@@ -55,7 +66,7 @@ async def set_office(pool:asyncpg.Pool, office_id:str):
 
 async def set_discussion(pool:asyncpg.Pool, disc_data:dict) -> int:
     discussion = await get_discussion(pool, disc_data["source_url"])
-    time_now = datetime.datetime.now(datetime.timezone.utc)
+    time_now = datetime.datetime.now(datetime.UTC)
     if discussion is not None:
         return discussion["product_id"]
     discussion = await upsert_discussion(pool, disc_data["source"], disc_data["issuing_office"], disc_data["wmo_collective_id"], disc_data["product_code"], disc_data["product_name"], disc_data["issuance_time"], time_now, disc_data["source_url"], disc_data["raw_product_text"])

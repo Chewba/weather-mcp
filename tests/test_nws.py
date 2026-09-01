@@ -435,7 +435,7 @@ async def test_weather_discussion_success(monkeypatch):
         client=None, coordinates=Coordinates(lat=36.0956, lon=-79.8269)
     )
 
-    assert discussions == ["Area Forecast Discussion text."]
+    assert discussions == [PRODUCT]
 
 
 @pytest.mark.asyncio
@@ -453,9 +453,7 @@ async def test_weather_discussion_none_found(monkeypatch):
         client=None, coordinates=Coordinates(lat=36.0956, lon=-79.8269)
     )
 
-    assert discussions == [
-        "No discussions found for https://api.weather.gov/products/types/AFD/locations/RAH"
-    ]
+    assert discussions == []
 
 
 @pytest.mark.asyncio

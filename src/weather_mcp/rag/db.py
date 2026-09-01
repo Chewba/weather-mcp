@@ -1,6 +1,8 @@
-import asyncpg, datetime
-import weather_mcp.config as config
+import asyncpg
 from pgvector.asyncpg import register_vector
+
+from weather_mcp import config
+
 
 async def _init_conn(conn):
     await register_vector(conn)
@@ -40,7 +42,6 @@ async def upsert_office(
         latitude,
         longitude,
     )
-    return
 
 async def get_office(pool:asyncpg.Pool, office_id: str) -> asyncpg.Record:
     office_data = await pool.fetchrow(

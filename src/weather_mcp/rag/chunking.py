@@ -1,5 +1,7 @@
 import re
+
 from weather_mcp.rag.embeddings import encode_vectors
+
 
 def parse_chunks(discussion:dict, office:dict) -> list:
     CHUNK_BASE = {
@@ -35,7 +37,7 @@ def parse_chunks(discussion:dict, office:dict) -> list:
         chunk_order = chunk_order + 1
         texts.append(chunk['chunk_text'])
     embedding = encode_vectors(texts)
-    for i in range(0, chunk_order):
+    for i in range(chunk_order):
         chunks[i]['embedding'] = embedding[i]
     return chunks
 
