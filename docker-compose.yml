@@ -1,0 +1,17 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: weather-mcp-user
+      POSTGRES_PASSWORD: testing-weather-mcp-user
+      POSTGRES_DB: weather-mcp
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U weather-mcp-user"]
+      interval: "3s"
+      timeout: "3s"
+      retries: 3
