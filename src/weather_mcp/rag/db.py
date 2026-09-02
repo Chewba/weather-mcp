@@ -2,6 +2,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from weather_mcp import config
+from weather_mcp.rag.embeddings import encode_vectors
 
 
 async def _init_conn(conn):
@@ -23,6 +24,15 @@ async def get_pool() -> asyncpg.Pool:
         )
     return _pool
 
+async def reset_db() -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            TRUNCATE TABLE weather_discussion_chunks
+                        , weather_discussion_products;
+            """
+        )
 
 async def upsert_office(
     pool: asyncpg.Pool,
@@ -168,3 +178,26 @@ async def get_discussion_chunk(pool:asyncpg.Pool, chunk_id: int) -> asyncpg.Reco
         chunk_id,
     )
     return discussion_data
+
+async def search_chunks(query: str, office_id: str | None = None, top_k: int = 5) -> list[asyncpg.Record]:
+    pool = await get_pool()
+    query_embedding = encode_vectors([query])[0]
+    where_clause = "WHERE issuing_office = $3" if office_id else ""
+    sql = f"""
+            SELECT
+                issuing_office,
+                chunk_type,
+                subsection,
+                issued_at,
+                chunk_text,
+                embedding <=> $1 AS distance
+            FROM weather_discussion_chunks
+            {where_clause}
+            ORDER BY embedding <=> $1
+            LIMIT $2
+        """
+    if office_id:
+        rows = await pool.fetch(sql, query_embedding, top_k, office_id)
+    else:
+        rows = await pool.fetch(sql, query_embedding, top_k)
+    return rows
