@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import anthropic
@@ -19,10 +20,17 @@ MCP_SERVER_PARAMS = {
     "args": ["run", "--directory", str(REPO_ROOT), "weather-mcp"],
 }
 
+# scripts/ isn't a package under src/, so it's not importable via the normal
+# weather_mcp namespace -- add it to sys.path the same way this file already
+# relies on its own directory being on sys.path for `from config import ...`.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from seed_db import seed as seed_corpus
+
 ALLOWED_TOOLS = (
     "mcp__weather__get_daily_forecast,mcp__weather__get_hourly_forecast,"
     "mcp__weather__get_current_conditions,mcp__weather__get_active_alerts,"
-    "mcp__weather__get_weather_discussion,mcp__weather__compare_forecasts"
+    "mcp__weather__get_weather_discussion,mcp__weather__compare_forecasts,"
+    "mcp__weather__search_forecast_history,mcp__weather__explain_forecast_reasoning"
 )
 JUDGE_SAMPLES = 3
 JUDGE_PROMPT_TEMPLATE = (
@@ -392,6 +400,9 @@ async def run_api_batch(args) -> None:
 
 
 def main(args) -> None:
+    print(f"\nSeeding RAG corpus (mode={args.corpus_mode})...")
+    asyncio.run(seed_corpus(strict=args.corpus_mode == "strict"))
+
     if args.backend == "api":
         asyncio.run(run_api_batch(args))
     else:
@@ -415,5 +426,16 @@ if __name__ == "__main__":
         "--judge-samples",
         type=int,
         default=int(os.environ.get("JUDGE_SAMPLES", JUDGE_SAMPLES)),
+    )
+    parser.add_argument(
+        "--corpus-mode",
+        choices=["strict", "drift"],
+        default=os.environ.get("EVAL_CORPUS_MODE", "drift"),
+        help=(
+            "strict: reset the DB and seed only the golden fixture, for a "
+            "reproducible RAG-tool corpus. drift: seed the golden fixture as a "
+            "floor, then layer in the 10 most recent live discussions per "
+            "office on top, without resetting existing data."
+        ),
     )
     main(parser.parse_args())
