@@ -138,6 +138,14 @@ a good fixed benchmark for that v3 work -- rerun this same Greensboro query
 against whatever adaptive step gets built and check whether KSHV/KMEG/KOHX/
 KFFC/KCAE start showing up alongside KRAH.
 
+**Update after the first real eval-harness run** (see "Eval harness run"
+section below for full detail): given the freedom to make several tool
+calls, the model already approximated this diversify-by-query strategy on
+its own -- 3 differently-worded searches with a wide self-selected `top_k`
+got 6 of 7 offices in the correct order. Before building new adaptive
+retrieval code, worth testing whether a docstring nudge toward multi-query
+search gets most of the benefit for less engineering cost.
+
 ## Open questions for future test cases
 
 - Does retrieval correctly distinguish two offices with genuinely similar
@@ -149,3 +157,104 @@ KFFC/KCAE start showing up alongside KRAH.
 - Chunk-type filtering (`WHERE chunk_type = 'DISCUSSION'`) combined with
   vector search hasn't been tried yet -- likely reduces the ridge/trough
   confusion above since `OTHER`/aviation-style chunks carry a lot of the noise.
+
+## Eval harness run: real model behavior against the v2 RAG tools
+
+The above was all `scripts/test_retrieval.py` against raw SQL -- a different
+layer than actually asking a model to choose and use `search_forecast_history`
+/ `explain_forecast_reasoning` on its own. `tests/eval/run_eval.py` (headless
+backend, Haiku under test, Sonnet judging x3, `--corpus-mode strict`) now has
+12 questions exercising these two tools end to end. First real run surfaced
+findings at both the tool-selection and the retrieval-adaptivity layers.
+
+**The model can already approximate "multi-query expansion" on its own --
+this changes what v3 needs to be.** The full-chain question ("list every
+office that mentioned this ridge") is the exact scenario the "Future work"
+section below identifies as needing an adaptive retrieval step. Given the
+freedom to make several tool calls, the model made 3 `search_forecast_history`
+calls with differently-worded queries and self-selected `top_k` of 20-30 (well
+above the default 5) -- and got **KFWD -> KSHV -> KMEG -> KOHX -> KFFC -> KRAH**,
+6 of the 7 documented offices, in the correct order (only missing KCAE).
+That's the model spontaneously doing the diversify-by-query strategy the
+"Future work" section proposed as *new adaptive-retrieval code* -- it did it
+unprompted, with the tools as they exist today. This doesn't mean v3 is
+unnecessary (a single default-top_k call still fails, as documented above),
+but it reframes the fix: possibly a docstring nudge toward "try several
+phrasings with a wider top_k for a tracing/pattern question" gets most of the
+way there, rather than requiring new retrieval architecture. Worth testing
+directly before building anything more elaborate.
+
+**The LLM judge is unreliable in both directions on these questions --
+confirmed with a concrete before/after example, not just asserted.** Two
+questions this run illustrate the exact same failure from opposite sides:
+
+- The sharper origin question ("which office first reported the ridge... and
+  when") got a checkably *wrong* answer -- the model named **KMEG** (a real
+  intermediate hop) as the origin instead of the true origin, **KFWD** -- and
+  the judge scored it **6-8/10** anyway: plausible, well-formatted, and wrong.
+- The full-chain question above got a checkably *strong* answer (6 of 7
+  offices, correct order) and the judge scored it **2-5/10**.
+
+Neither is judge noise in the already-documented sense (same input, different
+scores across runs) -- these are two *different* questions, judged once each,
+landing on opposite sides of correct. `tests/eval/grading.py` now has
+`grade_facts()`, a deterministic ground-truth text check (does the answer
+mention the right office code, in the right relative order) wired in via
+`expected_facts` on these two questions specifically. Re-run directly against
+the real captured answers above: `grade_facts` scores the KMEG answer **0**
+and the 6-of-7 chain answer **9** -- catching both misses `quality_score`
+alone missed. This is a supplement, not a replacement -- most questions don't
+have an answer this checkable, so `quality_score` still carries them.
+
+**The model consistently avoids the `office_id` parameter, even for
+easy-to-resolve city names.** Across the Dallas/Greensboro, sharper-origin,
+and full-chain questions, the model repeatedly called `search_forecast_history`
+with the city name folded into the free-text `query` string (e.g.
+`"end of August weather conditions Dallas Texas"`) rather than setting
+`office_id="KFWD"` -- including for "Raleigh," the one case where the
+office code is directly derivable from the city name (KRAH). This held even
+though `search_forecast_history`'s docstring explicitly recommends office
+scoping. Unscoped search still worked reasonably well in these cases (the
+corpus is small enough that relevance alone often lands on the right office),
+but this is exactly the behavior that would degrade first as the corpus
+grows -- worth a docstring pass emphasizing office scoping more forcefully,
+and/or a follow-up eval run to see if it's consistent or run-to-run noise.
+
+**A "declined honestly" strategy was worth adding to a real question, for
+the same reason already documented for Atlantis/Springfield/London.** Asked
+to compare Dallas and Greensboro's end-of-August weather, the model made zero
+tool calls and explained that neither RAG tool provides actual historical
+*observations* (only forecast discussion text) -- arguably the most
+epistemically honest response available, not a failure to attempt something.
+`tests/eval/questions.py`'s `expected_calls` for that question originally had
+no zero-call strategy, so this correct behavior would have scored a flat 0.
+Fixed by adding a `declined` strategy -- but note it had to be ranked
+*between* the two real-attempt strategies (not above them, unlike Atlantis),
+since `grading.py`'s exclusive-cluster logic picks whichever strategy in a
+tied/highest-scoring cluster "wins," and a `declined` strategy tied with or
+above a genuine multi-call attempt would incorrectly cannibalize credit for
+that attempt. Confirmed empirically against `grade_question` before trusting
+it, same discipline as everywhere else in this file.
+
+**Two known-fragile questions found and fixed while running this for real.**
+The original "mountains affect KRAH" pairing test worked as designed (see
+below), but two *other* questions turned out to have real authoring bugs,
+not model or retrieval failures:
+- The full-chain question originally said "this ridge" with no antecedent --
+  each eval question fires as an isolated, context-free prompt, so the model
+  correctly asked for clarification instead of guessing. Reworded to name the
+  ridge and timeframe directly in the same prompt.
+- (See `tests/eval/questions.py` comments for both fixes in full.)
+
+**The mountains/KRAH fabrication test worked exactly as designed, and more
+precisely than expected.** The model retrieved real KRAH content (Western
+Piedmont fog patterns, Eastern Piedmont heat differences) and then fabricated
+the *causal* mechanism on top of real citations -- "this is exactly how
+orographic effects work" -- even though the retrieved text never actually
+attributes those differences to mountains or terrain. This is a subtler
+failure than inventing content outright: real citations, invented causation.
+The judge scored it correctly (2/10). The KFFC positive-case pairing was less
+conclusive -- the model skipped retrieval entirely on that one (zero tool
+calls, answered from outside knowledge, plus an odd aside asking whether this
+was "for the evaluation harness") -- worth a follow-up run to see if that's
+consistent.

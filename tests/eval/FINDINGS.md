@@ -1,8 +1,9 @@
 # weather-mcp Eval Harness: Methodology & Findings
 
 Status: covers work through the `run_eval.py` unification (headless + API
-backends, both now verified live) and the 16-question `questions.py` dataset.
-Update as more runs happen.
+backends, both now verified live), the 28-question `questions.py` dataset
+(16 original + 12 exercising the RAG tools), and `grade_facts` for
+objectively-checkable questions. Update as more runs happen.
 
 ## What this harness measures
 
@@ -20,14 +21,25 @@ tool selection while containing a real factual error a user could act on badly
 (see "The Boone trip question" below), and single-tool-call correctness alone
 would never have caught it.
 
+A third, narrower check exists for the handful of questions with an
+objectively checkable answer: **`fact_score`**, from `grade_facts()`,
+deterministic like `tool_score` but checking the *answer text* against a
+known ground truth (a specific office code, an ordered chain of offices)
+rather than the tool calls. See "quality_score is not reliable enough to
+stand alone on checkable questions" below for why this exists -- it isn't a
+general replacement for `quality_score`, most questions don't have an answer
+this checkable.
+
 ## Architecture
 
-- `questions.py` -- the shared question set (12 questions as of this writing),
-  each with an `expected_calls` list describing acceptable tool-call
-  strategies. Shared by both backends so results are comparable regardless of
-  how the model was invoked.
-- `grading.py` -- pure, deterministic grading logic (`grade_question`), fully
-  unit-tested (`test_grading.py`, 11 tests) with no network calls.
+- `questions.py` -- the shared question set (28 questions as of this
+  writing), each with an `expected_calls` list describing acceptable
+  tool-call strategies, and optionally an `expected_facts` dict for questions
+  with a checkable answer. Shared by both backends so results are comparable
+  regardless of how the model was invoked.
+- `grading.py` -- pure, deterministic grading logic (`grade_question` for
+  tool calls, `grade_facts` for answer-text ground truth), fully unit-tested
+  (`test_grading.py`, 18 tests) with no network calls.
 - `run_eval.py` -- the harness itself, with two backends:
   - `--backend headless` (default): shells out to `claude -p`, billed against
     the operator's Claude subscription. Cost figures here are the CLI's
@@ -96,6 +108,70 @@ run (and its cost) was lost to one stray formatting choice. Fixed with
 requiring an exact match -- covered by `test_run_eval.py`. Any harness that
 parses a "just give me a number" LLM response needs to assume it won't always
 get exactly that.
+
+**`quality_score` is not reliable enough to stand alone on checkable
+questions -- confirmed with a concrete example, not just judge-variance
+noise.** Two of the new RAG-tool questions have an objectively correct
+answer (a specific NWS office code; an ordered chain of office codes). On the
+same run: a question where the model named the *wrong* office as a ridge's
+origin (KMEG instead of the true origin, KFWD) was judged **6-8/10** --
+plausible and well-formatted, and wrong. A question where the model got a
+7-office chain **6-of-7 correct, in the right order** was judged **2-5/10**.
+This isn't the same phenomenon as the judge-variance finding above (same
+input, different scores across runs) -- these are two different questions,
+each judged once per sample, landing on opposite sides of correct. Added
+`grade_facts()` to `grading.py` and `expected_facts` to `questions.py` for
+exactly these two questions -- a deterministic text check (does the answer
+mention the right office code(s), in the right relative order) that scores
+the KMEG answer `0` and the 6-of-7 chain answer `9`, catching both misses
+`quality_score` alone did not. See `scripts/rag_test_notes.md`'s "Eval
+harness run" section for the full RAG-specific writeup; this is the
+methodology/harness side of the same finding.
+
+## Harness bugs found while running the new RAG-tool questions
+
+Not `weather_mcp` bugs, not RAG-quality findings -- bugs in `run_eval.py`
+itself, all only surfaced once the RAG questions started producing larger
+inputs/outputs than the original 16-question set ever did:
+
+1. **Headless auth conflict**: `claude -p` refused to run at all
+   (`API Error: 401` or a connectors-disabled warning) whenever
+   `ANTHROPIC_API_KEY` was set in the environment -- it took precedence over
+   the CLI's own subscription login. Not a code bug (the `api` backend needs
+   that variable), but worth documenting: run the headless backend with it
+   explicitly unset for that invocation (`env -u ANTHROPIC_API_KEY ...`),
+   don't unset it globally.
+2. **Windows `cp1252` decode crash**: `subprocess.run(cmd, text=True, ...)`
+   with no explicit `encoding=` defaults to the OS locale's codepage on
+   Windows, not UTF-8. The moment any subprocess output (weather alert text,
+   AFD text, or the model's own answer) contained a multi-byte UTF-8
+   character `cp1252` can't represent, the internal reader thread crashed
+   silently, leaving `result.stdout` as `None` and the real error hidden
+   behind an unrelated `AttributeError: 'NoneType' object has no attribute
+   'splitlines'`. This was luck-of-the-content, not content-specific --
+   fixed by passing `encoding="utf-8"` explicitly.
+3. **Windows command-line length limit (`WinError 206`)**: the judge prompt
+   embeds the *entire* raw tool response text (`build_judge_prompt`'s
+   `tool_data`), and `search_forecast_history` can return several KB across
+   `top_k` full chunks -- multiple KB more than any of the original 16
+   questions' tool responses ever produced. Passing that as a positional CLI
+   argument to `claude -p` exceeded Windows' (much tighter than Linux's)
+   command-line length limit. Fixed by piping the prompt via stdin instead
+   (`subprocess.run(cmd, input=prompt, ...)`, with `-p` given no positional
+   argument) -- confirmed working directly with a 20KB test prompt before
+   rolling it into the harness. This scales to arbitrarily large prompts
+   regardless of platform, so it's a strict improvement even for the
+   original questions, not just the new ones.
+4. **Anonymous HuggingFace Hub rate-limit risk**: each fresh subprocess
+   (every `claude -p` call spins up its own MCP server process, and the
+   embeddings model is a per-process lazy singleton) re-authenticates
+   anonymously against HF Hub, logged explicitly:
+   `Warning: You are sending unauthenticated requests to the HF Hub`. Not an
+   actual 429 yet, but real, avoidable load across dozens of subprocess
+   spawns per run -- mitigated two ways: `--skip-seed` to avoid re-seeding
+   (and re-embedding all 160 fixture records) on every retry, and
+   `HF_HUB_OFFLINE=1` once the model is already cached locally, which
+   eliminates the network round-trip entirely.
 
 ## Real server bugs the eval process surfaced
 
