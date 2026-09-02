@@ -15,6 +15,13 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from questions_mcp import MCP_QUESTIONS
 from questions_rag import RAG_QUESTIONS
 
+# Windows' stdout/stderr default to the console codepage (e.g. cp1252), not
+# UTF-8, even when redirected to a file -- tool data and model answers can
+# contain arbitrary Unicode (arrows, smart quotes, degree signs), so a plain
+# print() of either crashes with UnicodeEncodeError the moment one shows up.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_SERVER_PARAMS = {
     "command": "uv",
@@ -27,11 +34,30 @@ MCP_SERVER_PARAMS = {
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 from seed_db import seed as seed_corpus
 
-ALLOWED_TOOLS = (
+# Scoped per question-set rather than one shared allow-list: MCP_QUESTIONS
+# legitimately need get_weather_discussion/compare_forecasts, but no
+# RAG_QUESTIONS expected_calls ever call for those (verified against
+# questions_rag.py) -- yet get_weather_discussion pulls a full live AFD
+# product (multi-KB), and that raw text gets embedded verbatim in the judge
+# prompt (build_judge_prompt) and re-sent once per --judge-samples. Handing
+# the model access to it during RAG-only questions burned real usage on
+# nothing the RAG tools were even being tested for.
+MCP_TOOLS = (
     "mcp__weather__get_daily_forecast,mcp__weather__get_hourly_forecast,"
     "mcp__weather__get_current_conditions,mcp__weather__get_active_alerts,"
-    "mcp__weather__get_weather_discussion,mcp__weather__compare_forecasts,"
+    "mcp__weather__get_weather_discussion,mcp__weather__compare_forecasts"
+)
+RAG_TOOLS = (
     "mcp__weather__search_forecast_history,mcp__weather__explain_forecast_reasoning"
+)
+# Headless `claude -p` runs as a full coding agent in REPO_ROOT, not a
+# sandbox limited to the MCP tools above -- confirmed live when
+# search_forecast_history errored (DB connection refused) and the model
+# fell back to Read-ing tests/eval/questions_rag.py's answer key straight
+# off disk and reciting it, scoring a perfect (and meaningless) fact_score.
+# --allowedTools only pre-approves the MCP tools; it does not deny these.
+DISALLOWED_BUILTIN_TOOLS = (
+    "Read,Grep,Glob,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task"
 )
 JUDGE_SAMPLES = 3
 JUDGE_PROMPT_TEMPLATE = (
@@ -50,12 +76,18 @@ PRICING_PER_MTOK_USD = {
 }
 
 
-def select_questions(question_set: str) -> list[dict]:
+def select_questions(question_set: str) -> list[tuple[dict, str]]:
+    """Pairs each question with the tool allow-list it should run under, so
+    a --question-set both run still scopes RAG questions away from
+    get_weather_discussion/compare_forecasts (and vice versa) per-question,
+    not just for pure single-set runs."""
     if question_set == "mcp":
-        return MCP_QUESTIONS
+        return [(q, MCP_TOOLS) for q in MCP_QUESTIONS]
     if question_set == "rag":
-        return RAG_QUESTIONS
-    return MCP_QUESTIONS + RAG_QUESTIONS
+        return [(q, RAG_TOOLS) for q in RAG_QUESTIONS]
+    return [(q, MCP_TOOLS) for q in MCP_QUESTIONS] + [
+        (q, RAG_TOOLS) for q in RAG_QUESTIONS
+    ]
 
 # ---------------------------------------------------------------------------
 # Shared: judge prompt construction, score averaging, cost reporting -- used
@@ -156,7 +188,9 @@ def print_fact_summary(fact_results: list[tuple[str, int]]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
+def run_claude(
+    prompt: str, model: str, use_mcp: bool, allowed_tools: str = MCP_TOOLS + "," + RAG_TOOLS
+) -> list[dict]:
     # Prompt is piped via stdin rather than passed as a CLI argument -- the
     # judge prompt embeds full raw tool output (e.g. search_forecast_history
     # can return several KB of AFD passages), which blew past Windows'
@@ -177,7 +211,9 @@ def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
             mcp_config,
             "--strict-mcp-config",
             "--allowedTools",
-            ALLOWED_TOOLS,
+            allowed_tools,
+            "--disallowedTools",
+            DISALLOWED_BUILTIN_TOOLS,
         ]
     result = subprocess.run(
         cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", check=False
@@ -243,8 +279,8 @@ def extract_cost_usd(events: list[dict]) -> float:
     return 0.0
 
 
-def run_question_headless(model: str, question: str) -> dict:
-    events = run_claude(question, model, use_mcp=True)
+def run_question_headless(model: str, question: str, allowed_tools: str) -> dict:
+    events = run_claude(question, model, use_mcp=True, allowed_tools=allowed_tools)
     calls = extract_weather_tool_calls(events)
     tool_responses = [
         extract_tool_result(events, tool_use_id) for _, _, tool_use_id in calls
@@ -276,8 +312,8 @@ def run_headless_batch(args) -> None:
     questions = select_questions(args.question_set)
     n = len(questions)
 
-    for quest in questions:
-        answer = run_question_headless(args.model, quest["question"])
+    for quest, allowed_tools in questions:
+        answer = run_question_headless(args.model, quest["question"], allowed_tools)
         print(f"\n{quest['question']} DONE")
         judge_prompt = build_judge_prompt(answer)
         print("\nRating Prompt", judge_prompt)
@@ -411,7 +447,7 @@ async def run_api_batch(args) -> None:
     ):
         await session.initialize()
         tools = await session.list_tools()
-        anthropic_tools = [
+        all_anthropic_tools = [
             {
                 "name": t.name,
                 "description": t.description,
@@ -420,7 +456,19 @@ async def run_api_batch(args) -> None:
             for t in tools.tools
         ]
 
-        for quest in questions:
+        for quest, allowed_tools in questions:
+            # allowed_tools carries the claude-CLI-style "mcp__weather__x"
+            # names (shared with the headless backend); the raw MCP session
+            # here exposes tools under their bare name, so strip the prefix
+            # before filtering -- see MCP_TOOLS/RAG_TOOLS above for why this
+            # scoping exists at all.
+            allowed_names = {
+                name.removeprefix("mcp__weather__")
+                for name in allowed_tools.split(",")
+            }
+            anthropic_tools = [
+                t for t in all_anthropic_tools if t["name"] in allowed_names
+            ]
             answer = await run_question_api(
                 client, session, anthropic_tools, args.model, quest["question"]
             )

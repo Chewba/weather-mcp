@@ -246,6 +246,29 @@ not model or retrieval failures:
   ridge and timeframe directly in the same prompt.
 - (See `tests/eval/questions.py` comments for both fixes in full.)
 
+**Update after fixing the harness's tool-scoping/leakage bugs (see
+`tests/eval/FINDINGS.md` items 5-7): the origin-office question failed for
+real, and it's the same failure this file already predicted.** An earlier
+run of "which office first reported the ridge that brought heat to Raleigh"
+had scored a fabricated `fact_score: 10` -- the model had read
+`questions_rag.py`'s own answer key off disk rather than actually retrieving
+anything, because the tool call had failed (DB was down) and headless mode
+had unrestricted filesystem access. With that leak closed and the DB
+confirmed up, the same question was asked again for real:
+`search_forecast_history(query="ridge heat Raleigh")` at the default
+`top_k=5` returned only `KRAH` and `KOHX` chunks -- `KFWD`, the actual origin
+and the office geographically farthest from Raleigh, never appeared. The
+model answered "KOHX first reported it," confidently and wrong
+(`fact_score: 0`). This is exactly the "Future work: adaptive/multi-hop
+retrieval (v3)" failure mode above, caught live rather than via raw SQL: a
+query worded around the *symptom* (heat reaching Raleigh) semantically favors
+chunks from the *symptom's* office over the *cause's* office, and a narrow
+`top_k` never gives the distant-but-correct answer a chance to surface. Where
+the full-chain question got the model to spontaneously widen `top_k` and
+multi-query on its own (see above), this narrower single-fact question did
+not -- worth checking whether that's phrasing-dependent or just inconsistent
+behavior on a follow-up run.
+
 **The mountains/KRAH fabrication test worked exactly as designed, and more
 precisely than expected.** The model retrieved real KRAH content (Western
 Piedmont fog patterns, Eastern Piedmont heat differences) and then fabricated
