@@ -9,10 +9,11 @@ from pathlib import Path
 
 import anthropic
 from config import MODEL_JUDGE, MODEL_UNDER_TEST
-from grading import grade_question
+from grading import grade_facts, grade_question
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from questions import TESTING_DATA
+from questions_mcp import MCP_QUESTIONS
+from questions_rag import RAG_QUESTIONS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_SERVER_PARAMS = {
@@ -48,6 +49,14 @@ PRICING_PER_MTOK_USD = {
     "claude-sonnet-5": (3.00, 15.00),
 }
 
+
+def select_questions(question_set: str) -> list[dict]:
+    if question_set == "mcp":
+        return MCP_QUESTIONS
+    if question_set == "rag":
+        return RAG_QUESTIONS
+    return MCP_QUESTIONS + RAG_QUESTIONS
+
 # ---------------------------------------------------------------------------
 # Shared: judge prompt construction, score averaging, cost reporting -- used
 # identically by both backends so results are comparable across them.
@@ -77,11 +86,15 @@ def build_judge_prompt(answer: dict) -> str:
 
 
 def build_rating(
-    answer: dict, expected_calls: list[dict], scores: list[int], judge_cost_usd: float
+    answer: dict,
+    expected_calls: list[dict],
+    scores: list[int],
+    judge_cost_usd: float,
+    expected_facts: dict | None = None,
 ) -> dict:
     quality_score = round(sum(scores) / len(scores))
     print("\nai ratings", scores, "-> averaged", quality_score)
-    return {
+    rating = {
         "tool_calls": answer["tool_calls"],
         "tool_score": grade_question(answer["tool_calls"], expected_calls),
         "quality_scores": scores,
@@ -89,6 +102,14 @@ def build_rating(
         "model_cost_usd": answer["cost_usd"],
         "judge_cost_usd": judge_cost_usd,
     }
+    if expected_facts:
+        # Deterministic ground-truth check, only for questions with an
+        # objectively checkable answer -- see grade_facts' docstring for why
+        # this exists alongside (not instead of) quality_score.
+        fact_score = grade_facts(answer["final_answer"], expected_facts)
+        rating["fact_score"] = fact_score
+        print("fact_score:", fact_score)
+    return rating
 
 
 def print_cost_summary(
@@ -118,6 +139,17 @@ def print_cost_summary(
         )
 
 
+def print_fact_summary(fact_results: list[tuple[str, int]]) -> None:
+    """Ground-truth fact checks, separate from the cost/quality summary above
+    since they only apply to the handful of questions with an objectively
+    checkable answer -- see grade_facts' docstring."""
+    if not fact_results:
+        return
+    print("\n--- Ground-truth fact checks (deterministic, not judge-scored) ---")
+    for question, score in fact_results:
+        print(f"  {score:>2}  {question}")
+
+
 # ---------------------------------------------------------------------------
 # Headless backend: shells out to `claude -p`, billed against the caller's
 # Claude subscription rather than ANTHROPIC_API_KEY.
@@ -125,10 +157,13 @@ def print_cost_summary(
 
 
 def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
+    # Prompt is piped via stdin rather than passed as a CLI argument -- the
+    # judge prompt embeds full raw tool output (e.g. search_forecast_history
+    # can return several KB of AFD passages), which blew past Windows'
+    # command-line length limit (WinError 206) when passed as argv.
     cmd = [
         "claude",
         "-p",
-        prompt,
         "--model",
         model,
         "--output-format",
@@ -144,7 +179,9 @@ def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
             "--allowedTools",
             ALLOWED_TOOLS,
         ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr}")
     return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
@@ -235,9 +272,11 @@ def judge_headless(
 def run_headless_batch(args) -> None:
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
-    n = len(TESTING_DATA)
+    fact_results = []
+    questions = select_questions(args.question_set)
+    n = len(questions)
 
-    for quest in TESTING_DATA:
+    for quest in questions:
         answer = run_question_headless(args.model, quest["question"])
         print(f"\n{quest['question']} DONE")
         judge_prompt = build_judge_prompt(answer)
@@ -245,12 +284,20 @@ def run_headless_batch(args) -> None:
         scores, judge_cost = judge_headless(
             args.judge_model, judge_prompt, args.judge_samples
         )
-        rating = build_rating(answer, quest["expected_calls"], scores, judge_cost)
+        rating = build_rating(
+            answer,
+            quest["expected_calls"],
+            scores,
+            judge_cost,
+            expected_facts=quest.get("expected_facts"),
+        )
         print(rating)
         total_model_cost += rating["model_cost_usd"]
         total_judge_cost += rating["judge_cost_usd"]
         total_tool_score += rating["tool_score"]
         total_quality_score += rating["quality_score"]
+        if "fact_score" in rating:
+            fact_results.append((quest["question"], rating["fact_score"]))
 
     print_cost_summary(
         args,
@@ -262,6 +309,7 @@ def run_headless_batch(args) -> None:
         "NOTE: these are the CLI's estimated API-equivalent prices, billed against your\n"
         "subscription rather than charged per-call -- a relative cost signal, not a real charge.",
     )
+    print_fact_summary(fact_results)
 
 
 # ---------------------------------------------------------------------------
@@ -353,7 +401,9 @@ async def run_api_batch(args) -> None:
 
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
-    n = len(TESTING_DATA)
+    fact_results = []
+    questions = select_questions(args.question_set)
+    n = len(questions)
 
     async with (
         stdio_client(params) as (read, write),
@@ -370,7 +420,7 @@ async def run_api_batch(args) -> None:
             for t in tools.tools
         ]
 
-        for quest in TESTING_DATA:
+        for quest in questions:
             answer = await run_question_api(
                 client, session, anthropic_tools, args.model, quest["question"]
             )
@@ -380,12 +430,20 @@ async def run_api_batch(args) -> None:
             scores, judge_cost = judge_api(
                 client, args.judge_model, judge_prompt, args.judge_samples
             )
-            rating = build_rating(answer, quest["expected_calls"], scores, judge_cost)
+            rating = build_rating(
+                answer,
+                quest["expected_calls"],
+                scores,
+                judge_cost,
+                expected_facts=quest.get("expected_facts"),
+            )
             print(rating)
             total_model_cost += rating["model_cost_usd"]
             total_judge_cost += rating["judge_cost_usd"]
             total_tool_score += rating["tool_score"]
             total_quality_score += rating["quality_score"]
+            if "fact_score" in rating:
+                fact_results.append((quest["question"], rating["fact_score"]))
 
     print_cost_summary(
         args,
@@ -397,11 +455,17 @@ async def run_api_batch(args) -> None:
         "NOTE: these figures are computed from actual token usage x list pricing above --\n"
         "this backend bills ANTHROPIC_API_KEY for real, unlike the headless backend.",
     )
+    print_fact_summary(fact_results)
 
 
 def main(args) -> None:
-    print(f"\nSeeding RAG corpus (mode={args.corpus_mode})...")
-    asyncio.run(seed_corpus(strict=args.corpus_mode == "strict"))
+    if args.skip_seed:
+        print("\nSkipping RAG corpus seeding (--skip-seed) -- running against whatever's already in the DB.")
+    elif args.question_set == "mcp":
+        print("\nSkipping RAG corpus seeding -- --question-set mcp doesn't touch the RAG corpus.")
+    else:
+        print(f"\nSeeding RAG corpus (mode={args.corpus_mode})...")
+        asyncio.run(seed_corpus(strict=args.corpus_mode == "strict"))
 
     if args.backend == "api":
         asyncio.run(run_api_batch(args))
@@ -428,6 +492,17 @@ if __name__ == "__main__":
         default=int(os.environ.get("JUDGE_SAMPLES", JUDGE_SAMPLES)),
     )
     parser.add_argument(
+        "--question-set",
+        choices=["mcp", "rag", "both"],
+        default=os.environ.get("EVAL_QUESTION_SET", "both"),
+        help=(
+            "mcp: only the original, non-RAG tool questions (no DB seeding). "
+            "rag: only the RAG retrieval-tool questions. both: all questions "
+            "(default) -- keep the sets separate when you only need to re-run "
+            "one, so a retry doesn't re-spend usage re-testing the other."
+        ),
+    )
+    parser.add_argument(
         "--corpus-mode",
         choices=["strict", "drift"],
         default=os.environ.get("EVAL_CORPUS_MODE", "drift"),
@@ -436,6 +511,16 @@ if __name__ == "__main__":
             "reproducible RAG-tool corpus. drift: seed the golden fixture as a "
             "floor, then layer in the 10 most recent live discussions per "
             "office on top, without resetting existing data."
+        ),
+    )
+    parser.add_argument(
+        "--skip-seed",
+        action="store_true",
+        default=os.environ.get("EVAL_SKIP_SEED", "").lower() in ("1", "true", "yes"),
+        help=(
+            "Skip corpus seeding entirely and run against whatever's already "
+            "in the DB -- useful when iterating on harness bugs without "
+            "paying the reseed cost (and its HF Hub calls) on every retry."
         ),
     )
     main(parser.parse_args())

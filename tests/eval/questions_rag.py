@@ -1,438 +1,11 @@
-"""Shared eval question set, referenced by any harness that scores this server's
-tool-selection behavior -- headless CLI (run_cli.py) or direct API calls (run.py) --
-so results are comparable against the same dataset regardless of how the model is invoked."""
+"""Eval question set for the RAG retrieval tools (search_forecast_history,
+explain_forecast_reasoning). Referenced by run_eval.py via
+--question-set rag|both. Split out from questions_mcp.py so a run scoped to
+just one tool family does not re-spend usage re-testing the other -- these
+questions also depend on RAG corpus state (see --corpus-mode), which the
+original MCP questions never did."""
 
-TESTING_DATA = [
-    {
-        "question": "What is the weather in Kansas City, MO?",
-        "expected_calls": [
-            {
-                "name": "conditions",
-                "calls": [
-                    {
-                        "tool": "get_current_conditions",
-                        "input": {"address": "Kansas City, MO"},
-                    }
-                ],
-                "score": 10,
-            },
-            {
-                "name": "forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Kansas City, MO"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 8,
-            },
-            {
-                "name": "alerts",
-                "calls": [
-                    {
-                        "tool": "get_active_alerts",
-                        "input": {"address": "Kansas City, MO"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        "question": "What will the weather be Kansas City, MO in an hour?",
-        "expected_calls": [
-            {
-                "name": "hourly",
-                "calls": [
-                    {
-                        "tool": "get_hourly_forecast",
-                        "input": {"address": "Kansas City, MO"},
-                        "optional_params": {"hours"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        "question": "What will the weather be Kansas City, MO tonight?",
-        "expected_calls": [
-            {
-                "name": "daily",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Kansas City, MO"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 10,
-            },
-            {
-                "name": "hourly",
-                "calls": [
-                    {
-                        "tool": "get_hourly_forecast",
-                        "input": {"address": "Kansas City, MO"},
-                        "optional_params": {"hours"},
-                    }
-                ],
-                "score": 8,
-            },
-        ],
-    },
-    {
-        "question": "Which city has better weather for the next few days Greensboro, NC or Charlotte, NC?",
-        "expected_calls": [
-            {
-                "name": "prime",
-                "calls": [
-                    {
-                        "tool": "compare_forecasts",
-                        "input": {
-                            "address1": "Greensboro, NC",
-                            "address2": "Charlotte, NC",
-                        },
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 10,
-                "exclusive": "secondary",
-            },
-            {
-                "name": "secondary",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Greensboro, NC"},
-                        "optional_params": {"days"},
-                    },
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Charlotte, NC"},
-                        "optional_params": {"days"},
-                    },
-                ],
-                "score": 4,
-                "exclusive": "prime",
-            },
-        ],
-    },
-    {
-        "question": "are there any active weather alerts for greensboro, nc?",
-        "expected_calls": [
-            {
-                "name": "alerts",
-                "calls": [
-                    {
-                        "tool": "get_active_alerts",
-                        "input": {"address": "Greensboro, NC"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        "question": "I am heading to Boone, NC should be there in 5 hours what weather should I expect when I get there and over my stay over the weekend?",
-        "expected_calls": [
-            {
-                "name": "arrival",
-                "calls": [
-                    {
-                        "tool": "get_hourly_forecast",
-                        "input": {"address": "Boone, NC"},
-                        "optional_params": {"hours"},
-                    }
-                ],
-                "score": 6,
-            },
-            {
-                "name": "weekend_outlook",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Boone, NC"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 6,
-            },
-        ],
-    },
-    {
-        "question": "What is the forecast for greensboro, nc and why do they think it is going to be like that?",
-        "expected_calls": [
-            {
-                "name": "forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Greensboro, NC"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 6,
-            },
-            {
-                "name": "reasoning",
-                "calls": [
-                    {
-                        "tool": "get_weather_discussion",
-                        "input": {"address": "Greensboro, NC"},
-                        "optional_params": {"count"},
-                    }
-                ],
-                "score": 8,
-            },
-        ],
-    },
-    {
-        "question": "What's the forecast for 27401 for the next couple days?",
-        "expected_calls": [
-            {
-                "name": "forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "27401"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        "question": "What are the National Weather Service forecasters saying about the weather pattern for Charlotte, NC this week?",
-        "expected_calls": [
-            {
-                "name": "discussion",
-                "calls": [
-                    {
-                        "tool": "get_weather_discussion",
-                        "input": {"address": "Charlotte, NC"},
-                        "optional_params": {"count"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        "question": "Should I visit Asheville or Boone, NC next week for hiking?",
-        "expected_calls": [
-            {
-                "name": "prime",
-                "calls": [
-                    {
-                        "tool": "compare_forecasts",
-                        "input": {"address1": "Asheville, NC", "address2": "Boone, NC"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 10,
-                "exclusive": "secondary",
-            },
-            {
-                "name": "secondary",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Asheville, NC"},
-                        "optional_params": {"days"},
-                    },
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Boone, NC"},
-                        "optional_params": {"days"},
-                    },
-                ],
-                "score": 4,
-                "exclusive": "prime",
-            },
-        ],
-    },
-    {
-        "question": "Is it safe to drive through Greensboro, NC right now?",
-        "expected_calls": [
-            {
-                "name": "conditions",
-                "calls": [
-                    {
-                        "tool": "get_current_conditions",
-                        "input": {"address": "Greensboro, NC"},
-                    }
-                ],
-                "score": 6,
-            },
-            {
-                "name": "alerts",
-                "calls": [
-                    {
-                        "tool": "get_active_alerts",
-                        "input": {"address": "Greensboro, NC"},
-                    }
-                ],
-                "score": 6,
-            },
-        ],
-    },
-    {
-        "question": "What's the forecast for the next 5 days in Kansas City, MO?",
-        "expected_calls": [
-            {
-                "name": "forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Kansas City, MO", "days": 5},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        # NWS's daily forecast caps at 7 days no matter the `days` param, which
-        # maps exactly onto "this week" and not at all onto "next week" -- so
-        # unlike a "this weekend or next weekend" phrasing (ambiguous to humans
-        # too, especially on a Sunday), any specific claim about "next week" here
-        # is unambiguous fabrication, no interpretation required. The interesting
-        # axis is quality (does the model admit the data limit?), not tool_score
-        # -- there's only one sensible tool to call.
-        "question": "Is it better to go to Boone, NC this week or next week?",
-        "expected_calls": [
-            {
-                "name": "forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Boone, NC"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 10,
-            },
-        ],
-    },
-    {
-        # Originally assumed a tool call was the only way to discover "Atlantis"
-        # isn't real (exercising LocationNotFoundError). Wrong: the model's own
-        # world knowledge recognizes it as mythical and declines without calling
-        # anything, which is the better outcome -- no point spending an API call
-        # confirming something already known. Declining is scored highest;
-        # calling anyway to double-check is acceptable but wasteful.
-        "question": "What's the weather in Atlantis?",
-        "expected_calls": [
-            {
-                "name": "declined",
-                "calls": [],
-                "score": 10,
-                "exclusive": ["attempted_conditions", "attempted_forecast"],
-            },
-            {
-                "name": "attempted_conditions",
-                "calls": [
-                    {"tool": "get_current_conditions", "input": {"address": "Atlantis"}}
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-            {
-                "name": "attempted_forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Atlantis"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-        ],
-    },
-    {
-        # Same wrong assumption as Atlantis, in reverse direction: expected a
-        # tool call was needed to surface LocationAmbiguousError, but the model
-        # already knows there are multiple US Springfields and asks for
-        # clarification directly, without wasting a call to discover that.
-        "question": "What's the weather in Springfield?",
-        "expected_calls": [
-            {
-                "name": "declined",
-                "calls": [],
-                "score": 10,
-                "exclusive": ["attempted_conditions", "attempted_forecast"],
-            },
-            {
-                "name": "attempted_conditions",
-                "calls": [
-                    {
-                        "tool": "get_current_conditions",
-                        "input": {"address": "Springfield"},
-                    }
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-            {
-                "name": "attempted_forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "Springfield"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-        ],
-    },
-    {
-        # Every tool docstring now says "(USA locations only)" -- this tests
-        # whether that actually changes behavior. Declining up front is the
-        # ideal (highest-scored) strategy since the docstring already tells the
-        # model this server can't help; calling anyway and relaying whatever
-        # NWS returns (likely a graceful ServiceUnavailableError, since NWS
-        # doesn't cover the UK) is acceptable but wastes a call, so it's marked
-        # exclusive with -- and scored lower than -- declining outright.
-        "question": "What's the weather in London, UK?",
-        "expected_calls": [
-            {
-                "name": "declined",
-                "calls": [],
-                "score": 10,
-                "exclusive": ["attempted_conditions", "attempted_forecast"],
-            },
-            {
-                "name": "attempted_conditions",
-                "calls": [
-                    {
-                        "tool": "get_current_conditions",
-                        "input": {"address": "London, UK"},
-                    }
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-            {
-                "name": "attempted_forecast",
-                "calls": [
-                    {
-                        "tool": "get_daily_forecast",
-                        "input": {"address": "London, UK"},
-                        "optional_params": {"days"},
-                    }
-                ],
-                "score": 6,
-                "exclusive": "declined",
-            },
-        ],
-    },
+RAG_QUESTIONS = [
     {
         # Mirrors the "heat ridge tracking (KFWD -> KRAH)" case in
         # scripts/rag_test_notes.md. Ground truth (found by scanning raw chunk
@@ -763,8 +336,24 @@ TESTING_DATA = [
         # here could be either problem, so don't attribute a miss to
         # retrieval alone without checking which office_id the model
         # actually used.
+        #
+        # Real run finding: the model made zero tool calls and instead
+        # honestly explained that neither RAG tool provides actual historical
+        # observations (only forecast discussion text), offering to attempt a
+        # partial search if wanted. That's arguably the best possible
+        # response to a genuinely ambiguous data question -- the same lesson
+        # already documented for Atlantis/Springfield/London (a zero-call
+        # decline can be the *better* outcome, not a failure to attempt
+        # something) -- so it's scored on par with the grounded-attempt
+        # strategies, not as a miss.
         "question": "Was the weather in Dallas, TX better than Greensboro, NC at the end of August?",
         "expected_calls": [
+            {
+                "name": "declined",
+                "calls": [],
+                "score": 6,
+                "exclusive": ["explain_both", "search_both", "broad_search"],
+            },
             {
                 "name": "explain_both",
                 "calls": [
@@ -780,7 +369,7 @@ TESTING_DATA = [
                     },
                 ],
                 "score": 10,
-                "exclusive": ["search_both", "broad_search"],
+                "exclusive": ["declined", "search_both", "broad_search"],
             },
             {
                 "name": "search_both",
@@ -797,7 +386,7 @@ TESTING_DATA = [
                     },
                 ],
                 "score": 9,
-                "exclusive": ["explain_both", "broad_search"],
+                "exclusive": ["declined", "explain_both", "broad_search"],
             },
             {
                 "name": "broad_search",
@@ -809,7 +398,7 @@ TESTING_DATA = [
                     }
                 ],
                 "score": 4,
-                "exclusive": ["explain_both", "search_both"],
+                "exclusive": ["declined", "explain_both", "search_both"],
             },
         ],
     },
@@ -817,16 +406,15 @@ TESTING_DATA = [
         # v3 candidate #2: a sharper, more checkably-gradable version of the
         # multi-hop causality question above. That question asks for an open
         # origin narrative; this asks for a specific fact -- a named office
-        # and an approximate date -- that can be checked directly against the
-        # final answer text (does it say "KFWD" and "Aug 29"?) rather than
-        # relying purely on the subjective LLM judge. Documented result for
-        # the narrative version applies here too: even scoped correctly to
-        # KRAH, KFWD's origin doesn't surface in the top hits today, so this
-        # should score decent tool_score but a wrong/missing answer on
-        # quality_score -- that gap is the whole point. This is the intended
+        # -- checked directly against the final answer text via
+        # grade_facts/expected_facts below, rather than relying purely on the
+        # subjective LLM judge. Real run finding, and exactly why this needed
+        # a fact check: the model named KMEG (a real intermediate hop) as the
+        # origin instead of the true origin, KFWD, but the judge still scored
+        # the answer 6-8/10 -- plausible, coherent, and *wrong*. expected_facts
+        # catches that; quality_score alone did not. This is the intended
         # regression benchmark for v3: re-run it once adaptive/multi-hop
-        # retrieval exists and check whether the answer starts correctly
-        # naming KFWD around Aug 29.
+        # retrieval exists and check whether fact_score actually improves.
         "question": "Which NWS office first reported the ridge that eventually brought heat to Raleigh, and around when did it start?",
         "expected_calls": [
             {
@@ -854,6 +442,7 @@ TESTING_DATA = [
                 "exclusive": "explain_krah",
             },
         ],
+        "expected_facts": {"must_mention": {"KFWD": 10}},
     },
     {
         # v3 candidate #3: promoted directly from the "Future work" section
@@ -871,7 +460,27 @@ TESTING_DATA = [
         # across offices), so today's only available strategy is a single
         # broad search; scoring it for making the attempt, since actually
         # naming most/all 7 offices in order is a v3-only bar, not a v2 one.
-        "question": "List, in order, every NWS office that mentioned this ridge as it moved from Texas to North Carolina.",
+        #
+        # Real run finding: the original phrasing ("this ridge") relied on
+        # implicit context from rag_test_notes.md that the model never sees
+        # -- each eval question fires as an isolated, context-free prompt, so
+        # "this ridge" had no antecedent. The model correctly asked for
+        # clarification and the judge correctly scored that highly (9) --
+        # that was a real bug in the question, not a retrieval or model
+        # failure. Reworded to be self-contained.
+        #
+        # Second real run finding, after the reword, and the reason this now
+        # has expected_facts: the model actually got remarkably close --
+        # KFWD -> KSHV -> KMEG -> KOHX -> KFFC -> KRAH, 6 of 7 offices in the
+        # correct order (only missing KCAE) -- by making 3 differently-worded
+        # search_forecast_history calls with a self-selected top_k of 20-30.
+        # That's the model spontaneously doing the "multi-query expansion"
+        # v3 strategy described above, without any adaptive-retrieval code
+        # existing yet. The judge still scored this 2-5/10 -- a checkably
+        # strong answer scored poorly, the mirror image of the origin
+        # question's checkably wrong answer scored well. grade_facts catches
+        # both; quality_score alone caught neither.
+        "question": "A ridge of high pressure brought unusually hot temperatures as it moved from Texas toward North Carolina in late August 2026. List, in order, every NWS office that mentioned this ridge.",
         "expected_calls": [
             {
                 "name": "broad_search",
@@ -885,6 +494,11 @@ TESTING_DATA = [
                 "score": 10,
             },
         ],
+        "expected_facts": {
+            "ordered_sequence": ["KFWD", "KSHV", "KMEG", "KOHX", "KFFC", "KCAE", "KRAH"],
+            "sequence_item_points": 1,
+            "order_bonus": 3,
+        },
     },
     {
         # Lower-priority than the two above -- not a v3 differentiator, but
@@ -926,6 +540,189 @@ TESTING_DATA = [
                     {
                         "tool": "search_forecast_history",
                         "input": {"office_id": "KLIX"},
+                        "optional_params": {"query", "top_k"},
+                    },
+                ],
+                "score": 9,
+                "exclusive": ["explain_both", "broad_search"],
+            },
+            {
+                "name": "broad_search",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {},
+                        "optional_params": {"query", "top_k", "office_id"},
+                    }
+                ],
+                "score": 4,
+                "exclusive": ["explain_both", "search_both"],
+            },
+        ],
+    },
+    {
+        # Every prior question where the model skipped office_id happened to
+        # still work out fine, because the offices involved had
+        # substantively different content (KFWD ridge-building vs KRAH heat
+        # arrival, KLIX drying vs KMFL wetting). This question is designed so
+        # skipping office_id actually costs something. Ground truth checked
+        # directly: KCAE and KFFC are adjacent hops in the same documented
+        # ridge chain and use nearly interchangeable heat language --
+        # KCAE: "well above normal temperatures with dangerous heat index
+        # values possible next week"; KFFC: "heat will build through the work
+        # week with triple digit heat indices returning." An unscoped search
+        # risks silently returning KFFC's content as if it were Columbia's.
+        # "Columbia, SC" isn't derivable to "KCAE" by spelling either, so
+        # this also carries the usual office-resolution-gap risk on top --
+        # a wrong answer here could be either problem, check which.
+        "question": "What is the Columbia, SC forecast office saying about the heat this week?",
+        "expected_calls": [
+            {
+                "name": "explain_kcae",
+                "calls": [
+                    {
+                        "tool": "explain_forecast_reasoning",
+                        "input": {"office_id": "KCAE"},
+                        "optional_params": {"query", "top_k"},
+                    }
+                ],
+                "score": 10,
+                "exclusive": ["search_kcae", "broad_search"],
+            },
+            {
+                "name": "search_kcae",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {"office_id": "KCAE"},
+                        "optional_params": {"query", "top_k"},
+                    }
+                ],
+                "score": 9,
+                "exclusive": ["explain_kcae", "broad_search"],
+            },
+            {
+                "name": "broad_search",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {},
+                        "optional_params": {"query", "top_k", "office_id"},
+                    }
+                ],
+                "score": 4,
+                "exclusive": ["explain_kcae", "search_kcae"],
+            },
+        ],
+    },
+    {
+        # Repeat of the full-chain question with different wording (no
+        # anaphoric "this ridge" this time -- self-contained from the start),
+        # to check whether the multi-query/wide-top_k behavior documented in
+        # rag_test_notes.md (3 differently-worded searches, self-selected
+        # top_k 20-30, got 6 of 7 offices correct in order) was a repeatable
+        # strategy or a one-off. Same ground truth chain, same fact check.
+        "question": "Trace, in chronological order, which National Weather Service offices reported an upper-level ridge of high pressure building over the southern Plains and shifting eastward across the South and Mid-Atlantic in late August 2026.",
+        "expected_calls": [
+            {
+                "name": "broad_search",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {},
+                        "optional_params": {"query", "top_k", "office_id"},
+                    }
+                ],
+                "score": 10,
+            },
+        ],
+        "expected_facts": {
+            "ordered_sequence": ["KFWD", "KSHV", "KMEG", "KOHX", "KFFC", "KCAE", "KRAH"],
+            "sequence_item_points": 1,
+            "order_bonus": 3,
+        },
+    },
+    {
+        # Isolates explain_forecast_reasoning's recency ordering specifically
+        # -- distinct from the existing "last week vs this week" question,
+        # which is a deliberate data-scope trap (no real prior week exists).
+        # This one is genuinely answerable: ground truth checked directly,
+        # KRAH's chunks currently span 2026-08-29 18:00 through
+        # 2026-09-01 22:44 (~3 days) -- real multi-day content to trend
+        # across. A good answer needs chunks read in time order to describe
+        # a trend correctly, not just the most topically relevant ones
+        # regardless of when they were issued -- exactly the difference
+        # between explain_forecast_reasoning's chronological ordering and
+        # search_forecast_history's distance-only ordering.
+        "question": "How has the weather been trending the past few days in KRAH?",
+        "expected_calls": [
+            {
+                "name": "explain_krah",
+                "calls": [
+                    {
+                        "tool": "explain_forecast_reasoning",
+                        "input": {"office_id": "KRAH"},
+                        "optional_params": {"query", "top_k"},
+                    }
+                ],
+                "score": 10,
+                "exclusive": "search_krah",
+            },
+            {
+                "name": "search_krah",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {"office_id": "KRAH"},
+                        "optional_params": {"query", "top_k"},
+                    }
+                ],
+                "score": 7,
+                "exclusive": "explain_krah",
+            },
+        ],
+    },
+    {
+        # A starker two-office comparison than KRAH-vs-KLIX (both of which
+        # are just "hot and stormy" to varying degrees, making a blended or
+        # wrong answer easy to miss). Ground truth checked directly: KPSR
+        # (Phoenix) is mid-monsoon with active thunderstorms, a Flood Watch,
+        # and heavy rainfall risk; KSEW (Seattle) is dry, mild, marine
+        # stratus, low fire-weather risk -- genuinely contrasting content, so
+        # a wrong or conflated answer should be much easier to catch. Raw
+        # codes given directly, sidestepping the office-resolution gap on
+        # purpose -- this is a pure retrieval/synthesis test, not compounded
+        # with resolution difficulty.
+        "question": "Compare the weather in KPSR and KSEW right now.",
+        "expected_calls": [
+            {
+                "name": "explain_both",
+                "calls": [
+                    {
+                        "tool": "explain_forecast_reasoning",
+                        "input": {"office_id": "KPSR"},
+                        "optional_params": {"query", "top_k"},
+                    },
+                    {
+                        "tool": "explain_forecast_reasoning",
+                        "input": {"office_id": "KSEW"},
+                        "optional_params": {"query", "top_k"},
+                    },
+                ],
+                "score": 10,
+                "exclusive": ["search_both", "broad_search"],
+            },
+            {
+                "name": "search_both",
+                "calls": [
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {"office_id": "KPSR"},
+                        "optional_params": {"query", "top_k"},
+                    },
+                    {
+                        "tool": "search_forecast_history",
+                        "input": {"office_id": "KSEW"},
                         "optional_params": {"query", "top_k"},
                     },
                 ],

@@ -1,4 +1,4 @@
-from grading import grade_question
+from grading import grade_facts, grade_question
 
 # Kansas City style: three independent, complementary strategies. No exclusivity.
 COMPLEMENTARY_STRATEGIES = [
@@ -166,3 +166,52 @@ def test_calling_anyway_still_scores_but_less():
     calls = [("get_current_conditions", {"address": "London, UK"})]
     # declined (score 10) wins the cluster; the attempted call is docked as extra
     assert grade_question(calls, DECLINE_STRATEGIES) == 10 - 2
+
+
+# grade_facts: deterministic ground-truth check against final answer text,
+# added after a real eval run showed the LLM judge scoring a checkably-wrong
+# answer highly and a checkably-correct one poorly on the same question shape.
+
+ORIGIN_FACTS = {"must_mention": {"KFWD": 10}}
+
+CHAIN_FACTS = {
+    "ordered_sequence": ["KFWD", "KSHV", "KMEG", "KOHX", "KFFC", "KCAE", "KRAH"],
+    "sequence_item_points": 1,
+    "order_bonus": 3,
+}
+
+
+def test_must_mention_hit_is_case_insensitive():
+    assert grade_facts("The ridge originated over kfwd on Aug 29.", ORIGIN_FACTS) == 10
+
+
+def test_must_mention_miss_scores_zero():
+    # Real observed failure: the model named KMEG (a real intermediate hop)
+    # as the origin instead of the true origin, KFWD.
+    assert grade_facts("KMEG appears to be the first office to report it.", ORIGIN_FACTS) == 0
+
+
+def test_ordered_sequence_full_match_with_order_bonus():
+    answer = "First KFWD, then KSHV, then KMEG, then KOHX, then KFFC, then KCAE, then KRAH."
+    assert grade_facts(answer, CHAIN_FACTS) == 7 * 1 + 3
+
+
+def test_ordered_sequence_partial_match_in_order_still_gets_bonus():
+    # Real observed result: 6 of 7 offices named, correct relative order,
+    # missing only KCAE -- should score close to full, not collapse to zero.
+    answer = "KFWD, then KSHV, then KMEG, then KOHX, then KFFC, then KRAH."
+    assert grade_facts(answer, CHAIN_FACTS) == 6 * 1 + 3
+
+
+def test_ordered_sequence_out_of_order_gets_no_bonus():
+    answer = "KRAH mentioned it, and so did KFWD earlier on."
+    assert grade_facts(answer, CHAIN_FACTS) == 2 * 1
+
+
+def test_ordered_sequence_no_matches_scores_zero():
+    assert grade_facts("No offices are named here at all.", CHAIN_FACTS) == 0
+
+
+def test_ordered_sequence_single_match_gets_no_order_bonus():
+    # Order bonus requires at least two found items to mean anything.
+    assert grade_facts("Only KFWD is mentioned.", CHAIN_FACTS) == 1
