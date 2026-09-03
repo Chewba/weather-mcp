@@ -11,21 +11,26 @@ actually uses these two tools. Status: covers the 16-question
 `questions_rag.py` set, the retrieval-layer testing in
 `scripts/test_retrieval.py` that preceded it, the quantified
 `scripts/recall_at_k.py` benchmark, and the corpus overhaul
-(`scripts/build_test_data.py` + ingest-time dedup) that followed from it.
-**`questions_rag.py`'s ground truth has not yet been re-verified against
-the post-overhaul corpus -- see "Corpus overhaul" below before trusting any
-of its `expected_facts` results.**
+(`scripts/build_test_data.py` + ingest-time dedup, then the original
+ridge-narrative data merged back in) that followed from it. The corpus is
+now 239 products / 1,457 chunks spanning real distinct days plus the
+hand-verified ridge chain, at a 0.1% duplicate rate (was 47.1%).
+`questions_rag.py`'s `expected_facts` ground truth should be valid again
+now that the narrative data is restored, but hasn't been re-run
+end-to-end against the merged corpus yet -- see "Corpus overhaul" below.
 
 ## Raw retrieval-layer behavior (`scripts/test_retrieval.py` against the corpus directly)
 
-**Historical note:** every case below was run against the original fixture,
-since archived and superseded -- see "Corpus overhaul: duplicate-chunk fix
-and daily-spread fixture" further down for why and what changed.
-Re-running `test_retrieval.py` against the *current* live corpus will not
-reproduce these exact results; the findings (retrieval can reconstruct a
+**Historical note:** every case below was run against the corpus in its
+original, dense-reissuance state, before the "Corpus overhaul" section
+further down deduped it and spread it across more days (the underlying
+ridge-narrative *data* is still live today, merged back into the rebuilt
+fixture -- only the surrounding noise changed). Re-running
+`test_retrieval.py` now will not reproduce the exact distance values or
+rank positions below, since the candidate pool and its duplicate content
+have changed; the findings themselves (retrieval can reconstruct a
 chronology, single-query top-k can't chain causality across offices, etc.)
-are still the point, the specific numbers/offices below are a snapshot of a
-corpus state that no longer exists in the DB.
+still hold.
 
 This section is one layer below the eval harness -- no model, no tool
 calls, just SQL against `weather_discussion_chunks` to characterize what
@@ -411,28 +416,46 @@ Aug 27 - Sep 3 instead of Aug 29-31).
 
 **Combined result, reseeded from scratch (`strict` mode) with both changes
 in place:** duplicate-chunk rate dropped from **47.1% to 0.1%** (935 total
-chunks, 1 residual near-duplicate). Both changes contributed --
-day-to-day content is naturally less repetitive than hour-to-hour
-reissuance even before dedup kicks in, and dedup catches whatever
-coincidental repeats remain.
+chunks, 1 residual near-duplicate, on the daily-only fixture). Both changes
+contributed -- day-to-day content is naturally less repetitive than
+hour-to-hour reissuance even before dedup kicks in, and dedup catches
+whatever coincidental repeats remain.
 
-**What this breaks, honestly:** the hand-verified ridge-tracking narrative
-(KFWD -> KSHV -> KMEG -> KOHX -> KFFC -> KCAE -> KRAH, Aug 29-31) that most
-of `questions_rag.py`'s `expected_facts` questions and both
-`recall_at_k.py` benchmark cases are built around no longer exists in
-`test_data.json` -- it's real captured data from a specific 3-day window
-that has since fallen out of NWS's own retention (the same ~6-7 day
-limit above means it's not re-fetchable anymore either; good thing it was
-archived rather than just overwritten). Checked directly: all 16 offices
-in the *new* corpus mention "ridge"/"heat" somewhere, which just means
-those are generic weather-discussion words -- it does **not** confirm the
-old 7-office path is still the right ground truth for a *different*
-real-world ridge event happening now. `recall_at_k.py` now prints an
-explicit warning about this rather than silently reporting numbers against
-unverified ground truth. Re-verifying ground truth against the new corpus
-(same discipline as the original case: read the actual chunk text, don't
-assume) and updating or replacing the affected `questions_rag.py` questions
-is real follow-up work, not done as part of this change.
+**The archived ridge-tracking narrative was then merged back in, not left
+behind.** It's real, validly-captured data (the hand-verified KFWD ->
+KSHV -> KMEG -> KOHX -> KFFC -> KCAE -> KRAH chain most of
+`questions_rag.py`'s `expected_facts` questions and both `recall_at_k.py`
+benchmark cases depend on) -- discarding it just because it's dense would
+have thrown away a real, already-hard-to-reproduce dataset for no reason
+now that dedup exists to handle density safely. Merged by product `id`
+(239 unique records total, 37 were already present in both), reseeded from
+scratch again: **still 0.1% duplicate rate** (1,457 chunks) -- confirming
+dedup handles the dense reissuance data safely even when it's deliberately
+mixed back in with the sparser daily samples. Re-verified live that all 7
+ridge-path offices still carry the original content at the original dates
+(e.g. KFWD chunks spanning 2026-08-27 through 09-03, including the
+original Aug 29-31 window).
+
+**Recall@k, before vs. after, on the ridge/heat case:**
+
+| | ground truth | recall@5 | recall@10 | recall@20 | recall@50 |
+|---|---|---|---|---|---|
+| Before (dense, duplicated) | 236 | 1.7% | 2.5% | 4.7% | 13.1% |
+| After (deduped, merged) | 205 | 2.0% | 3.9% | 6.8% | 17.1% |
+
+Recall@50 improved (13.1% -> 17.1%), but only modestly -- most of the
+original low-recall finding was never about corpus duplication in the
+first place. This is a useful negative result: it confirms the dominant
+cause really is what the multi-hop-causality case diagnosed (a query
+worded around the symptom out-competing the differently-worded cause), not
+noise from duplicate chunks crowding out `top_k`. Deduping was still worth
+doing -- a noisier corpus is worse for every future query, not just this
+one -- but it was not the fix for *this* specific finding.
+
+`questions_rag.py`'s `expected_facts` ground truth should be valid again
+given the narrative data is restored, but hasn't been independently
+re-run end-to-end against the merged corpus yet -- that's the remaining
+follow-up, not a re-authoring task.
 
 ## Eval-harness-level findings: how a model actually uses these two tools
 
