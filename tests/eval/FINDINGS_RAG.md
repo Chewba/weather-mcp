@@ -8,16 +8,13 @@ This document covers everything specific to the two retrieval-facing tools,
 retrieval-layer behavior against the corpus directly, harness bugs the RAG
 questions surfaced, and eval-harness-level findings about how a model
 actually uses these two tools. Status: covers the 16-question
-`questions_rag.py` set, the retrieval-layer testing in
-`scripts/test_retrieval.py` that preceded it, the quantified
-`scripts/recall_at_k.py` benchmark, and the corpus overhaul
-(`scripts/build_test_data.py` + ingest-time dedup, then the original
-ridge-narrative data merged back in) that followed from it. The corpus is
-now 239 products / 1,457 chunks spanning real distinct days plus the
-hand-verified ridge chain, at a 0.1% duplicate rate (was 47.1%).
-`questions_rag.py`'s `expected_facts` ground truth should be valid again
-now that the narrative data is restored, but hasn't been re-run
-end-to-end against the merged corpus yet -- see "Corpus overhaul" below.
+`questions_rag.py` set (re-run end-to-end after the corpus overhaul below),
+the retrieval-layer testing in `scripts/test_retrieval.py` that preceded
+it, the quantified `scripts/recall_at_k.py` benchmark, and the corpus
+overhaul (`scripts/build_test_data.py` + ingest-time dedup, then the
+original ridge-narrative data merged back in) that followed from it. The
+corpus is now 239 products / 1,457 chunks spanning real distinct days plus
+the hand-verified ridge chain, at a 0.1% duplicate rate (was 47.1%).
 
 ## Raw retrieval-layer behavior (`scripts/test_retrieval.py` against the corpus directly)
 
@@ -452,10 +449,71 @@ noise from duplicate chunks crowding out `top_k`. Deduping was still worth
 doing -- a noisier corpus is worse for every future query, not just this
 one -- but it was not the fix for *this* specific finding.
 
-`questions_rag.py`'s `expected_facts` ground truth should be valid again
-given the narrative data is restored, but hasn't been independently
-re-run end-to-end against the merged corpus yet -- that's the remaining
-follow-up, not a re-authoring task.
+`questions_rag.py`'s `expected_facts` ground truth is confirmed valid
+again given the narrative data is restored -- re-run end-to-end against
+the merged corpus, see "Full eval-harness rerun after the corpus overhaul"
+immediately below.
+
+## Full eval-harness rerun after the corpus overhaul
+
+The recall@k comparison above is a controlled experiment -- identical
+query, identical `k`, only the corpus changed. Also ran the full
+`--question-set rag` suite (16 questions, headless, 3 judge samples)
+against the deduped/merged corpus, DB confirmed up, no errors, to see
+whether the corpus fix moved anything at the harness level too:
+
+| | Before (`eval_run_9.log`) | After (`eval_run_11.log`) |
+|---|---|---|
+| Avg `tool_score` | 3.7 | 3.6 |
+| Avg `quality_score` | 4.2 | 4.6 |
+| Total cost (model + judge x3) | $2.25 | $2.15 |
+
+Essentially flat -- within the noise this project has already documented
+repeatedly (judge variance, run-to-run tool-strategy variance), not a
+signal either way.
+
+**The three `expected_facts` questions moved in different directions, not
+uniformly better:**
+
+| Question | Before | After |
+|---|---|---|
+| Which office first reported the ridge? | 0/10 | 0/10 |
+| List every office, in order | 8/10 | 5/10 |
+| Trace chronologically | 4/10 | 6/10 |
+
+Worth being honest about why, rather than reading a trend into three noisy
+numbers: checked the actual tool calls behind each. The "list every
+office" question scored *worse* after the fix -- but the before-run made
+**two** `search_forecast_history` calls with different phrasings
+(`top_k=20` each), while the after-run made **one**. The after-run's
+single-call answer also mixed in `KLIX` (never on the documented path) and
+returned `KRAH` out of order. The "trace chronologically" question scored
+*better* after the fix -- but the before-run used `top_k=10` and the
+after-run used `top_k=20`, a wider net independent of corpus content. In
+both cases the model chose a different tool-call strategy between runs --
+call count and `top_k` are the model's own choice each time, not something
+the harness controls for -- so these two movements are confounded with
+already-documented tool-strategy variance (see `FINDINGS.md`'s
+"Tool-selection consistency findings"), not cleanly attributable to the
+corpus fix. The recall@k comparison above is the trustworthy signal for
+"did the fix help retrieval"; this full-harness rerun is not a clean
+enough experiment to add anything beyond confirming nothing broke.
+
+**One new, real finding from this run, unrelated to the corpus change:**
+on the origin-office question, the model called
+`search_forecast_history` with `{"query": "ridge Raleigh", "location":
+"RAH"}` -- `location` is not a real parameter (the tool takes
+`office_id`), and `"RAH"` isn't even correctly formatted (missing the `K`
+prefix used everywhere else in this corpus). The call still succeeded --
+the invalid field was silently ignored -- so it ran as an unscoped,
+default-`top_k=5` search, at the mercy of whatever generically
+ridge/heat-worded content ranked highest (in this run: `KSEW` and `KOHX`,
+neither the true origin). This sharpens the existing "model consistently
+avoids the `office_id` parameter" finding in the section right below this
+one: this isn't just avoidance, it's sometimes inventing a
+plausible-but-wrong parameter name for office scoping and never finding
+out the call didn't do what it intended, because the server had no way to
+reject it.
 
 ## Eval-harness-level findings: how a model actually uses these two tools
 
