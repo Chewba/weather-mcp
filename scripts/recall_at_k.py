@@ -15,6 +15,21 @@ hardcoded -- chunk_ids are BIGSERIAL and not stable across reseeds, and
 `--corpus-mode drift` runs mean row counts can shift between runs anyway.
 Run `docker ps` first; this needs the DB up, same as any other eval script.
 
+CAUTION -- BENCHMARK_CASES below were authored against the original
+2-3-day-dense fixture (archived as test_data_ridge_case_archive.json) and
+its specific curated ridge-tracking narrative (a subtropical ridge moving
+KFWD -> ... -> KRAH). After the corpus was rebuilt across real distinct
+days (scripts/build_test_data.py), a quick check found *all 16* offices
+mention "ridge"/"heat" somewhere -- unsurprising, since those are generic
+weather-discussion words, not proof the same connected event is still
+traceable through the same 7 offices. The ground-truth WHERE clauses below
+have NOT been re-verified against the rebuilt corpus (no one has read the
+actual chunk text to confirm those 7 offices are still describing one
+coherent ridge, the way the original archived-fixture case was verified).
+Treat any number this script prints for that case as provisional until
+someone does that re-verification -- same "ground truth checked directly,
+not assumed" discipline as everywhere else in this project.
+
 Usage:
     uv run python scripts/recall_at_k.py
 """
@@ -100,6 +115,9 @@ async def run_case(pool, case: dict) -> None:
 
 
 async def main() -> None:
+    print("NOTE: BENCHMARK_CASES' ground-truth definitions have not been "
+          "re-verified against the rebuilt (daily-sampled) corpus -- see "
+          "module docstring. Treat these numbers as provisional.\n")
     pool = await get_pool()
     for case in BENCHMARK_CASES:
         await run_case(pool, case)

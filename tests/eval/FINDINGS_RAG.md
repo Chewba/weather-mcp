@@ -9,10 +9,23 @@ retrieval-layer behavior against the corpus directly, harness bugs the RAG
 questions surfaced, and eval-harness-level findings about how a model
 actually uses these two tools. Status: covers the 16-question
 `questions_rag.py` set, the retrieval-layer testing in
-`scripts/test_retrieval.py` that preceded it, and the quantified
-`scripts/recall_at_k.py` benchmark.
+`scripts/test_retrieval.py` that preceded it, the quantified
+`scripts/recall_at_k.py` benchmark, and the corpus overhaul
+(`scripts/build_test_data.py` + ingest-time dedup) that followed from it.
+**`questions_rag.py`'s ground truth has not yet been re-verified against
+the post-overhaul corpus -- see "Corpus overhaul" below before trusting any
+of its `expected_facts` results.**
 
 ## Raw retrieval-layer behavior (`scripts/test_retrieval.py` against the corpus directly)
+
+**Historical note:** every case below was run against the original fixture,
+since archived and superseded -- see "Corpus overhaul: duplicate-chunk fix
+and daily-spread fixture" further down for why and what changed.
+Re-running `test_retrieval.py` against the *current* live corpus will not
+reproduce these exact results; the findings (retrieval can reconstruct a
+chronology, single-query top-k can't chain causality across offices, etc.)
+are still the point, the specific numbers/offices below are a snapshot of a
+corpus state that no longer exists in the DB.
 
 This section is one layer below the eval harness -- no model, no tool
 calls, just SQL against `weather_discussion_chunks` to characterize what
@@ -359,13 +372,67 @@ layer**: every duplicate chunk that lands in a `top_k` result is a slot not
 spent on a distinct piece of relevant content -- the "2 near-identical
 Key Messages costing you a spot" intuition that motivated this check is
 real, it's just happening across reissuances (different `product_id`s) at a
-much larger scale (47% of the corpus) than within one discussion. Not yet
-fixed -- candidate approaches, not yet built or compared: (a) ingest-time
-dedup, skip inserting a chunk whose normalized text already exists for the
-same `(office, chunk_type, subsection)` within some recency window, or
-(b) retrieval-time dedup, drop near-duplicate rows from a candidate set
-before truncating to `top_k`. The recall@k benchmark above is the natural
-before/after measurement once one of these is built.
+much larger scale (47% of the corpus) than within one discussion. Fixed --
+see "Corpus overhaul" immediately below.
+
+## Corpus overhaul: duplicate-chunk fix and daily-spread fixture
+
+Two changes, done together, directly in response to the finding above:
+
+**1. Ingest-time dedup (`rag/db.py`'s `filter_new_chunks`).** Before
+inserting a discussion's parsed chunks, checks whether a normalized-text
+match already exists for the same `(issuing_office, chunk_type,
+subsection)` and drops it if so -- one query per discussion (that office's
+existing chunk texts), then a pure-Python set check, wired into
+`ingest.py`'s `ingest_discussion` right before `upsert_discussion_chunk`.
+Confirmed live: re-ingesting an already-present discussion added zero new
+chunks (72 before, 72 after). Unit-tested in `test_db.py` (exact match,
+whitespace/case-normalized match, subsection correctly kept as part of the
+dedup key so two genuinely different key messages that happen to share
+wording aren't wrongly collapsed, empty-input short circuit) and
+`test_ingest.py` (the all-duplicates case skips `upsert_discussion_chunk`
+entirely).
+
+**2. Fixture rebuilt across real distinct days (`scripts/build_test_data.py`,
+new).** The old fixture (archived as `test_data_ridge_case_archive.json`)
+took 10 discussions per office within a ~2-3 day span -- almost entirely
+near-identical reissuances, which is exactly what produced the 47.1%
+duplicate-chunk corpus. The new script pulls real NWS data instead: for
+each of the same 16 offices, hits
+`https://api.weather.gov/products/types/AFD/locations/{office}` (no `K`
+prefix) and picks one discussion per available calendar day, closest to
+18:00 UTC. Verified live before writing the script that this endpoint
+accepts no `start`/`end`/`limit` query params and only exposes a rolling
+**~6-7 day window** (confirmed consistently across RAH, SEW, BOU, MFL) --
+not the full 10 days originally wanted; 7-8 distinct days per office is
+what's actually achievable through this endpoint, so that's what the
+fixture now has (116 total records, down from 160, but spread across
+Aug 27 - Sep 3 instead of Aug 29-31).
+
+**Combined result, reseeded from scratch (`strict` mode) with both changes
+in place:** duplicate-chunk rate dropped from **47.1% to 0.1%** (935 total
+chunks, 1 residual near-duplicate). Both changes contributed --
+day-to-day content is naturally less repetitive than hour-to-hour
+reissuance even before dedup kicks in, and dedup catches whatever
+coincidental repeats remain.
+
+**What this breaks, honestly:** the hand-verified ridge-tracking narrative
+(KFWD -> KSHV -> KMEG -> KOHX -> KFFC -> KCAE -> KRAH, Aug 29-31) that most
+of `questions_rag.py`'s `expected_facts` questions and both
+`recall_at_k.py` benchmark cases are built around no longer exists in
+`test_data.json` -- it's real captured data from a specific 3-day window
+that has since fallen out of NWS's own retention (the same ~6-7 day
+limit above means it's not re-fetchable anymore either; good thing it was
+archived rather than just overwritten). Checked directly: all 16 offices
+in the *new* corpus mention "ridge"/"heat" somewhere, which just means
+those are generic weather-discussion words -- it does **not** confirm the
+old 7-office path is still the right ground truth for a *different*
+real-world ridge event happening now. `recall_at_k.py` now prints an
+explicit warning about this rather than silently reporting numbers against
+unverified ground truth. Re-verifying ground truth against the new corpus
+(same discipline as the original case: read the actual chunk text, don't
+assume) and updating or replacing the affected `questions_rag.py` questions
+is real follow-up work, not done as part of this change.
 
 ## Eval-harness-level findings: how a model actually uses these two tools
 

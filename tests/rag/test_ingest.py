@@ -49,6 +49,10 @@ async def test_ingest_discussion_runs_pipeline_in_order(monkeypatch):
         calls.append(("parse_chunks", discussion_data["product_id"], office_data))
         return ["chunk1", "chunk2"]
 
+    async def fake_filter_new_chunks(pool, chunks):
+        calls.append(("filter_new_chunks", pool, chunks))
+        return chunks
+
     async def fake_upsert_discussion_chunk(pool, chunks):
         calls.append(("upsert_discussion_chunk", pool, chunks))
 
@@ -56,6 +60,7 @@ async def test_ingest_discussion_runs_pipeline_in_order(monkeypatch):
     monkeypatch.setattr(ingest, "set_office", fake_set_office)
     monkeypatch.setattr(ingest, "set_discussion", fake_set_discussion)
     monkeypatch.setattr(ingest, "parse_chunks", fake_parse_chunks)
+    monkeypatch.setattr(ingest, "filter_new_chunks", fake_filter_new_chunks)
     monkeypatch.setattr(ingest, "upsert_discussion_chunk", fake_upsert_discussion_chunk)
 
     await ingest.ingest_discussion(RAW_PRODUCT, "KRAH")
@@ -64,8 +69,43 @@ async def test_ingest_discussion_runs_pipeline_in_order(monkeypatch):
         ("set_office", "POOL", "KRAH"),
         ("set_discussion", "POOL", "https://api.weather.gov/products/abc123"),
         ("parse_chunks", 99, {"office_id": "KRAH", "latitude": 1.0, "longitude": 2.0}),
+        ("filter_new_chunks", "POOL", ["chunk1", "chunk2"]),
         ("upsert_discussion_chunk", "POOL", ["chunk1", "chunk2"]),
     ]
+
+
+@pytest.mark.asyncio
+async def test_ingest_discussion_skips_upsert_when_all_chunks_are_duplicates(monkeypatch):
+    """A reissued AFD whose chunks all already exist (see filter_new_chunks)
+    should not reach upsert_discussion_chunk at all -- an empty executemany
+    is harmless, but skipping it makes the "nothing new here" case explicit
+    and avoids a pointless round trip."""
+    async def fake_get_pool():
+        return "POOL"
+
+    async def fake_set_office(pool, office_id):
+        return {"office_id": office_id, "latitude": 1.0, "longitude": 2.0}
+
+    async def fake_set_discussion(pool, disc_data):
+        return 99
+
+    def fake_parse_chunks(discussion_data, office_data):
+        return ["chunk1", "chunk2"]
+
+    async def fake_filter_new_chunks(pool, chunks):
+        return []
+
+    async def fail_upsert_discussion_chunk(pool, chunks):
+        raise AssertionError("should not upsert when every chunk was a duplicate")
+
+    monkeypatch.setattr(ingest, "get_pool", fake_get_pool)
+    monkeypatch.setattr(ingest, "set_office", fake_set_office)
+    monkeypatch.setattr(ingest, "set_discussion", fake_set_discussion)
+    monkeypatch.setattr(ingest, "parse_chunks", fake_parse_chunks)
+    monkeypatch.setattr(ingest, "filter_new_chunks", fake_filter_new_chunks)
+    monkeypatch.setattr(ingest, "upsert_discussion_chunk", fail_upsert_discussion_chunk)
+
+    await ingest.ingest_discussion(RAW_PRODUCT, "KRAH")
 
 
 @pytest.mark.asyncio

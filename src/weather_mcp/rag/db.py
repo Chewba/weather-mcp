@@ -152,6 +152,44 @@ async def upsert_discussion_chunk(
     )
     return response
 
+def _normalize_chunk_text(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+async def filter_new_chunks(pool: asyncpg.Pool, chunks: list[dict]) -> list[dict]:
+    """Drops any chunk whose normalized text already exists for the same
+    (issuing_office, chunk_type, subsection). NWS reissues an AFD every few
+    hours and often repeats a section verbatim between reissuances -- without
+    this, a live-seeded corpus ends up with a large fraction of chunks being
+    exact-text duplicates of an earlier one (see tests/eval/FINDINGS_RAG.md's
+    "Duplicate-chunk corpus finding": 47.1% of chunks, before this fix).
+    One query per discussion (all of one office's existing chunks), then a
+    pure-Python set check -- cheap relative to the embedding call already
+    paid for every chunk in `chunks`, and easy to unit test without needing
+    to fake a sequence of per-chunk DB round trips."""
+    if not chunks:
+        return chunks
+    office_id = chunks[0]["issuing_office"]
+    rows = await pool.fetch(
+        """
+        SELECT chunk_type, subsection, chunk_text
+        FROM weather_discussion_chunks
+        WHERE issuing_office = $1
+        """,
+        office_id,
+    )
+    existing = {
+        (row["chunk_type"], row["subsection"], _normalize_chunk_text(row["chunk_text"]))
+        for row in rows
+    }
+    return [
+        chunk
+        for chunk in chunks
+        if (chunk["chunk_type"], chunk["subsection"], _normalize_chunk_text(chunk["chunk_text"]))
+        not in existing
+    ]
+
+
 async def get_discussion_chunk(pool:asyncpg.Pool, chunk_id: int) -> asyncpg.Record:
     discussion_data = await pool.fetchrow(
         """

@@ -144,6 +144,96 @@ async def test_search_chunks_without_office_id_has_no_leftover_placeholder(fake_
 
 
 @pytest.mark.asyncio
+async def test_filter_new_chunks_drops_exact_text_duplicate(fake_pool):
+    fake_pool.fetch_result = [
+        {"chunk_type": "AVIATION", "subsection": "AVIATION", "chunk_text": "VFR conditions expected."}
+    ]
+
+    new_chunk = {
+        "issuing_office": "KBOU",
+        "chunk_type": "AVIATION",
+        "subsection": "AVIATION",
+        "chunk_text": "VFR conditions expected.",
+    }
+
+    result = await db.filter_new_chunks(fake_pool, [new_chunk])
+
+    assert result == []
+    kind, sql, args = fake_pool.calls[0]
+    assert kind == "fetch"
+    assert "WHERE issuing_office = $1" in sql
+    assert args == ("KBOU",)
+
+
+@pytest.mark.asyncio
+async def test_filter_new_chunks_ignores_whitespace_and_case_differences(fake_pool):
+    """NWS reissues often carry the same text with trivial whitespace
+    reflow -- normalization must catch these as duplicates too, not just
+    byte-identical text."""
+    fake_pool.fetch_result = [
+        {"chunk_type": "AVIATION", "subsection": "AVIATION", "chunk_text": "VFR   conditions\nexpected."}
+    ]
+
+    new_chunk = {
+        "issuing_office": "KBOU",
+        "chunk_type": "AVIATION",
+        "subsection": "AVIATION",
+        "chunk_text": "vfr conditions expected.",
+    }
+
+    result = await db.filter_new_chunks(fake_pool, [new_chunk])
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_filter_new_chunks_keeps_genuinely_new_text(fake_pool):
+    fake_pool.fetch_result = [
+        {"chunk_type": "AVIATION", "subsection": "AVIATION", "chunk_text": "VFR conditions expected."}
+    ]
+
+    new_chunk = {
+        "issuing_office": "KBOU",
+        "chunk_type": "AVIATION",
+        "subsection": "AVIATION",
+        "chunk_text": "IFR conditions with low ceilings expected.",
+    }
+
+    result = await db.filter_new_chunks(fake_pool, [new_chunk])
+
+    assert result == [new_chunk]
+
+
+@pytest.mark.asyncio
+async def test_filter_new_chunks_keeps_same_text_in_a_different_subsection(fake_pool):
+    """A duplicate check scoped only to (office, chunk_type) -- ignoring
+    subsection -- would wrongly drop two genuinely different key messages
+    that happen to share wording. subsection must be part of the key."""
+    fake_pool.fetch_result = [
+        {"chunk_type": "KEY_MESSAGES", "subsection": "1", "chunk_text": "Heat continues."}
+    ]
+
+    new_chunk = {
+        "issuing_office": "KBOU",
+        "chunk_type": "KEY_MESSAGES",
+        "subsection": "2",
+        "chunk_text": "Heat continues.",
+    }
+
+    result = await db.filter_new_chunks(fake_pool, [new_chunk])
+
+    assert result == [new_chunk]
+
+
+@pytest.mark.asyncio
+async def test_filter_new_chunks_empty_input_short_circuits(fake_pool):
+    result = await db.filter_new_chunks(fake_pool, [])
+
+    assert result == []
+    assert fake_pool.calls == []
+
+
+@pytest.mark.asyncio
 async def test_search_chunks_embeds_the_query_text(fake_pool, monkeypatch):
     captured = {}
 
