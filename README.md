@@ -83,8 +83,14 @@ NWS office identifier the two retrieval tools require — a model has to
 already know or be told the office code (e.g. `KRAH`) rather than guessing
 it from "Raleigh, NC." Also intentionally out of scope for now: adaptive/
 multi-hop retrieval (issuing follow-up queries automatically for
-causality-tracing questions) — see `scripts/rag_test_notes.md`'s "Future
-work" section.
+causality-tracing questions) — see [`tests/eval/FINDINGS_RAG.md`](tests/eval/FINDINGS_RAG.md)'s
+"Future work" section.
+
+Full RAG-specific eval findings — raw retrieval-layer behavior, harness bugs
+the RAG questions surfaced, and how a model actually uses these two tools —
+are written up in [`tests/eval/FINDINGS_RAG.md`](tests/eval/FINDINGS_RAG.md),
+alongside [`tests/eval/FINDINGS.md`](tests/eval/FINDINGS.md) for the shared
+harness and the original six tools.
 
 ## Testing
 
@@ -97,7 +103,7 @@ Both also run automatically in CI (`.github/workflows/ci.yml`) on every push and
 
 ## Eval harness
 
-`tests/eval/` is a from-scratch evaluation harness for the model-facing side of this server — not just "does the code work," but "does an LLM actually pick the right tool, with the right parameters, and give an honest, well-grounded answer." It's the part of this project that mattered most to build carefully; the full methodology and findings are written up in [`tests/eval/FINDINGS.md`](tests/eval/FINDINGS.md).
+`tests/eval/` is a from-scratch evaluation harness for the model-facing side of this server — not just "does the code work," but "does an LLM actually pick the right tool, with the right parameters, and give an honest, well-grounded answer." It's the part of this project that mattered most to build carefully; the full methodology and findings are written up in [`tests/eval/FINDINGS.md`](tests/eval/FINDINGS.md) (shared harness + the original six tools) and [`tests/eval/FINDINGS_RAG.md`](tests/eval/FINDINGS_RAG.md) (the two RAG retrieval tools).
 
 Briefly:
 - **`questions_mcp.py`** / **`questions_rag.py`** — 32 natural-language test questions total (16 original tools, 16 exercising the RAG tools), each with one or more acceptable tool-call *strategies* (not just one "correct" answer), scored with weights, optional parameters, and mutual exclusivity for redundant alternatives (e.g. calling `compare_forecasts` vs. calling `get_daily_forecast` twice). A handful of the RAG questions also carry `expected_facts` — a checkable ground-truth answer (a specific office code, an ordered chain of offices) for a deterministic fact check independent of the LLM judge.

@@ -8,7 +8,7 @@ original MCP questions never did."""
 RAG_QUESTIONS = [
     {
         # Mirrors the "heat ridge tracking (KFWD -> KRAH)" case in
-        # scripts/rag_test_notes.md. Ground truth (found by scanning raw chunk
+        # tests/eval/FINDINGS_RAG.md. Ground truth (found by scanning raw chunk
         # text, not retrieval): a ridge builds over KFWD ~Aug 29 and shifts
         # east, arriving as heat over KRAH by Aug 31 -- a real, traceable
         # cross-office pattern. search_forecast_history has no recency
@@ -33,7 +33,7 @@ RAG_QUESTIONS = [
         ],
     },
     {
-        # The "multi-hop causality" case from rag_test_notes.md, kept verbatim.
+        # The "multi-hop causality" case from tests/eval/FINDINGS_RAG.md, kept verbatim.
         # Ground truth: "Greensboro" never appears as a word anywhere in the
         # corpus, and its station code (KGSO) appears exactly once, buried in
         # a KRAH record-highs list -- so a correct office match has to come
@@ -76,7 +76,7 @@ RAG_QUESTIONS = [
         ],
     },
     {
-        # The "office-scoped topical search" case from rag_test_notes.md.
+        # The "office-scoped topical search" case from tests/eval/FINDINGS_RAG.md.
         # Ground truth: querying for severe thunderstorms + heat advisories
         # landed cleanly on KLIX (New Orleans) KEY_MESSAGES chunks, a tight
         # distance cluster (0.336-0.365) clearly separated from the rest of
@@ -160,7 +160,7 @@ RAG_QUESTIONS = [
     },
     {
         # True negative control, per the "Open questions" section of
-        # rag_test_notes.md. Ground truth checked directly: chunk_text ILIKE
+        # tests/eval/FINDINGS_RAG.md. Ground truth checked directly: chunk_text ILIKE
         # '%snow%' returns exactly one incidental hit in the entire 160-record
         # corpus (KSEW, not even really about snow) -- this is an August
         # corpus, there is no real snow content anywhere in it. Tests whether
@@ -186,7 +186,7 @@ RAG_QUESTIONS = [
     },
     {
         # The "does retrieval distinguish two genuinely similar offices"
-        # open question from rag_test_notes.md. Ground truth checked
+        # open question from tests/eval/FINDINGS_RAG.md. Ground truth checked
         # directly: both KLIX (New Orleans, 27 chunks) and KMFL (Miami, 14
         # chunks) discuss tropical moisture heavily, but describe *opposite*
         # trends -- KLIX trending drier ("what looked like a much drier and
@@ -446,7 +446,7 @@ RAG_QUESTIONS = [
     },
     {
         # v3 candidate #3: promoted directly from the "Future work" section
-        # of rag_test_notes.md, which specified this exact re-run as the
+        # of tests/eval/FINDINGS_RAG.md, which specified this exact re-run as the
         # benchmark for adaptive/multi-hop retrieval -- previously only a
         # prose note, not an actual eval question. Ground truth (backfilled
         # and verified in that session): the ridge is independently narrated
@@ -462,7 +462,7 @@ RAG_QUESTIONS = [
         # naming most/all 7 offices in order is a v3-only bar, not a v2 one.
         #
         # Real run finding: the original phrasing ("this ridge") relied on
-        # implicit context from rag_test_notes.md that the model never sees
+        # implicit context from tests/eval/FINDINGS_RAG.md that the model never sees
         # -- each eval question fires as an isolated, context-free prompt, so
         # "this ridge" had no antecedent. The model correctly asked for
         # clarification and the judge correctly scored that highly (9) --
@@ -619,7 +619,7 @@ RAG_QUESTIONS = [
         # Repeat of the full-chain question with different wording (no
         # anaphoric "this ridge" this time -- self-contained from the start),
         # to check whether the multi-query/wide-top_k behavior documented in
-        # rag_test_notes.md (3 differently-worded searches, self-selected
+        # tests/eval/FINDINGS_RAG.md (3 differently-worded searches, self-selected
         # top_k 20-30, got 6 of 7 offices correct in order) was a repeatable
         # strategy or a one-off. Same ground truth chain, same fact check.
         "question": "Trace, in chronological order, which National Weather Service offices reported an upper-level ridge of high pressure building over the southern Plains and shifting eastward across the South and Mid-Atlantic in late August 2026.",

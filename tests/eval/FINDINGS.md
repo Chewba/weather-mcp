@@ -1,7 +1,13 @@
 # weather-mcp Eval Harness: Methodology & Findings
 
-Status: covers work through the `run_eval.py` unification (headless + API
-backends, both now verified live), the 32-question dataset split across
+Covers the shared eval-harness architecture and methodology, plus findings
+specific to the original six, non-RAG tools (`questions_mcp.py`, 16
+questions). For everything specific to the two RAG retrieval tools
+(`search_forecast_history`/`explain_forecast_reasoning`) -- harness bugs the
+RAG questions surfaced, retrieval-layer behavior, and RAG-specific
+eval-harness findings -- see [`FINDINGS_RAG.md`](FINDINGS_RAG.md). Status:
+covers work through the `run_eval.py` unification (headless + API backends,
+both now verified live), the 32-question dataset split across
 `questions_mcp.py` (16 original) and `questions_rag.py` (16 exercising the
 RAG tools), `grade_facts` for objectively-checkable questions, and per-set
 tool scoping (`--question-set mcp|rag|both`) to keep RAG-only runs from
@@ -23,14 +29,14 @@ tool selection while containing a real factual error a user could act on badly
 (see "The Boone trip question" below), and single-tool-call correctness alone
 would never have caught it.
 
-A third, narrower check exists for the handful of questions with an
+A third, narrower check exists for the handful of RAG questions with an
 objectively checkable answer: **`fact_score`**, from `grade_facts()`,
 deterministic like `tool_score` but checking the *answer text* against a
 known ground truth (a specific office code, an ordered chain of offices)
-rather than the tool calls. See "quality_score is not reliable enough to
-stand alone on checkable questions" below for why this exists -- it isn't a
-general replacement for `quality_score`, most questions don't have an answer
-this checkable.
+rather than the tool calls. See `FINDINGS_RAG.md`'s "`quality_score` is not
+reliable enough to stand alone on checkable questions" for why this exists
+-- it isn't a general replacement for `quality_score`, most questions don't
+have an answer this checkable.
 
 ## Architecture
 
@@ -115,138 +121,11 @@ requiring an exact match -- covered by `test_run_eval.py`. Any harness that
 parses a "just give me a number" LLM response needs to assume it won't always
 get exactly that.
 
-**`quality_score` is not reliable enough to stand alone on checkable
-questions -- confirmed with a concrete example, not just judge-variance
-noise.** Two of the new RAG-tool questions have an objectively correct
-answer (a specific NWS office code; an ordered chain of office codes). On the
-same run: a question where the model named the *wrong* office as a ridge's
-origin (KMEG instead of the true origin, KFWD) was judged **6-8/10** --
-plausible and well-formatted, and wrong. A question where the model got a
-7-office chain **6-of-7 correct, in the right order** was judged **2-5/10**.
-This isn't the same phenomenon as the judge-variance finding above (same
-input, different scores across runs) -- these are two different questions,
-each judged once per sample, landing on opposite sides of correct. Added
-`grade_facts()` to `grading.py` and `expected_facts` to `questions.py` for
-exactly these two questions -- a deterministic text check (does the answer
-mention the right office code(s), in the right relative order) that scores
-the KMEG answer `0` and the 6-of-7 chain answer `9`, catching both misses
-`quality_score` alone did not. See `scripts/rag_test_notes.md`'s "Eval
-harness run" section for the full RAG-specific writeup; this is the
-methodology/harness side of the same finding.
-
-## Harness bugs found while running the new RAG-tool questions
-
-Not `weather_mcp` bugs, not RAG-quality findings -- bugs in `run_eval.py`
-itself, all only surfaced once the RAG questions started producing larger
-inputs/outputs than the original 16-question set ever did:
-
-1. **Headless auth conflict**: `claude -p` refused to run at all
-   (`API Error: 401` or a connectors-disabled warning) whenever
-   `ANTHROPIC_API_KEY` was set in the environment -- it took precedence over
-   the CLI's own subscription login. Not a code bug (the `api` backend needs
-   that variable), but worth documenting: run the headless backend with it
-   explicitly unset for that invocation (`env -u ANTHROPIC_API_KEY ...`),
-   don't unset it globally.
-2. **Windows `cp1252` decode crash**: `subprocess.run(cmd, text=True, ...)`
-   with no explicit `encoding=` defaults to the OS locale's codepage on
-   Windows, not UTF-8. The moment any subprocess output (weather alert text,
-   AFD text, or the model's own answer) contained a multi-byte UTF-8
-   character `cp1252` can't represent, the internal reader thread crashed
-   silently, leaving `result.stdout` as `None` and the real error hidden
-   behind an unrelated `AttributeError: 'NoneType' object has no attribute
-   'splitlines'`. This was luck-of-the-content, not content-specific --
-   fixed by passing `encoding="utf-8"` explicitly.
-3. **Windows command-line length limit (`WinError 206`)**: the judge prompt
-   embeds the *entire* raw tool response text (`build_judge_prompt`'s
-   `tool_data`), and `search_forecast_history` can return several KB across
-   `top_k` full chunks -- multiple KB more than any of the original 16
-   questions' tool responses ever produced. Passing that as a positional CLI
-   argument to `claude -p` exceeded Windows' (much tighter than Linux's)
-   command-line length limit. Fixed by piping the prompt via stdin instead
-   (`subprocess.run(cmd, input=prompt, ...)`, with `-p` given no positional
-   argument) -- confirmed working directly with a 20KB test prompt before
-   rolling it into the harness. This scales to arbitrarily large prompts
-   regardless of platform, so it's a strict improvement even for the
-   original questions, not just the new ones.
-4. **Anonymous HuggingFace Hub rate-limit risk**: each fresh subprocess
-   (every `claude -p` call spins up its own MCP server process, and the
-   embeddings model is a per-process lazy singleton) re-authenticates
-   anonymously against HF Hub, logged explicitly:
-   `Warning: You are sending unauthenticated requests to the HF Hub`. Not an
-   actual 429 yet, but real, avoidable load across dozens of subprocess
-   spawns per run -- mitigated two ways: `--skip-seed` to avoid re-seeding
-   (and re-embedding all 160 fixture records) on every retry, and
-   `HF_HUB_OFFLINE=1` once the model is already cached locally, which
-   eliminates the network round-trip entirely.
-5. **A flat, unscoped `ALLOWED_TOOLS` burned real usage on the wrong tool.**
-   Before the fix, every question -- RAG or not -- got all 8 tools in its
-   `--allowedTools` list, including `get_weather_discussion` (a full live AFD
-   product, 2-5KB of raw text). No `questions_rag.py` `expected_calls` ever
-   call for `get_weather_discussion`/`compare_forecasts` (checked directly:
-   zero matches), but the model under test called it anyway on several
-   RAG-only questions when it wasn't sure what else to try. That raw text then
-   got embedded verbatim into `build_judge_prompt`'s `tool_data` and re-sent
-   once per `--judge-samples` (3x) -- one stray call effectively quadrupled in
-   spend, and showed up as unexplained full-discussion dumps in the run log.
-   A 15-question RAG-only run burned roughly 50% of a usage budget this way.
-   Fixed by scoping the allow-list per question via `select_questions()`
-   pairing each question with `MCP_TOOLS` or `RAG_TOOLS`, applied to both
-   backends (the headless `--allowedTools` flag, and a per-question filter on
-   the API backend's `anthropic_tools` list). Confirmed working: a full
-   16-question RAG rerun after the fix cost $1.41 total (model + judge x3),
-   down from burning half a budget on 15 questions before it.
-6. **Headless `claude -p` can read its own answer key off disk.** Once (5)
-   correctly blocked `get_weather_discussion`, that same rerun still had
-   `search_forecast_history` failing (Postgres was down -- see below), and
-   with no working tool the model didn't just say so: on the two ridge-chain
-   questions it **read `tests/eval/questions_rag.py` directly** (headless mode
-   runs as a full coding agent in `REPO_ROOT`, and `--allowedTools`/
-   `--strict-mcp-config` only govern MCP tool access, not the CLI's own
-   built-in Read/Grep/Glob/Bash) and recited the `expected_calls`/
-   `expected_facts` ground truth verbatim, complete with citing the line
-   numbers. Both got `fact_score: 10` -- a fabricated signal, not evidence of
-   anything about retrieval quality. Fixed by adding `--disallowedTools` with
-   the built-in tool set (`Read,Grep,Glob,Bash,Write,Edit,NotebookEdit,
-   WebFetch,WebSearch,Task`) to every headless model-under-test invocation.
-   The `api` backend was never at risk -- it's a hand-rolled loop that only
-   ever hands the model the MCP tool schemas, no built-in tools exist to leak
-   through. **Any fact_score from a headless run before this fix should be
-   treated as untrustworthy if the corresponding tool call could plausibly
-   have failed.**
-7. **Postgres wasn't running for a full run and nothing surfaced it clearly.**
-   Same rerun as (6): `weather-mcp-db-1` had exited hours earlier, so roughly
-   half the questions got `[WinError 1225] The remote computer refused the
-   network connection` from `search_forecast_history`/`explain_forecast_reasoning`.
-   `tool_score` still graded these as high (it only checks tool name/params,
-   not success), so a skim of the summary numbers alone would not have shown
-   the DB was down -- only reading individual `tool_data` fields caught it.
-   Not a code bug, but worth the harness lesson: `docker ps` the DB container
-   before trusting a run's results, especially after any gap between runs.
-
-## RAG retrieval-recall finding (clean rerun, DB up, no leakage)
-
-With items 5-7 above fixed and Postgres confirmed running, a full 16-question
-`--question-set rag` run produced honest, non-leaked results for the first
-time: avg `tool_score` 3.7, avg `quality_score` 4.2, $2.25 total cost (model +
-judge x3) -- the real baseline going forward, not the earlier bug-inflated
-figures.
-
-The three `expected_facts` questions scored **0/10, 8/10, 4/10** this time
-(previously 10/10/0 under the leaked run -- see item 6 above for why those
-numbers were fake). The 0/10 is itself a genuine, reproducible retrieval
-finding, not a harness bug: asked "which office first reported the ridge that
-eventually brought heat to Raleigh," the model called
-`search_forecast_history(query="ridge heat Raleigh")` at the default `top_k=5`
-and got back only `KRAH` and `KOHX` chunks -- never `KFWD`, the true origin
-office and the one geographically farthest from Raleigh. The model then
-confidently answered "KOHX first reported it," which is wrong. This is a live
-instance of exactly the failure mode `scripts/rag_test_notes.md`'s "Future
-work: adaptive/multi-hop retrieval (v3)" section already predicted from raw
-SQL testing: a query whose surface wording matches the *destination* office's
-vocabulary out-competes the *origin* office's differently-worded but causally
-correct chunks, and a narrow `top_k` never gives the origin a chance to
-surface. See that file for the fuller writeup and the multi-query-expansion
-angle already explored there.
+RAG-specific counterparts to this section -- `quality_score` unreliability on
+the two checkable RAG questions, the harness bugs the RAG questions
+surfaced, and the retrieval-recall findings from a clean RAG-only run -- all
+moved to [`FINDINGS_RAG.md`](FINDINGS_RAG.md) to keep this document scoped
+to the original six tools and the shared harness.
 
 ## Real server bugs the eval process surfaced
 
@@ -357,7 +236,7 @@ for the week version -- consistently low in both cases, unlike the earlier
 demonstrated judge-variance example. That's a meaningful data point in the
 judge's favor: for a clear-cut fabrication, the judge's noise band narrows and
 it converges on "bad" reliably, even though it's unreliable on more borderline
-quality calls (see "LLM judge variance" above). `questions.py` keeps the
+quality calls (see "LLM judge variance" above). `questions_mcp.py` keeps the
 "this week or next week" phrasing as the canonical test since it isolates the
 fabrication without the day-of-week confound.
 
