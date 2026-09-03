@@ -8,8 +8,9 @@ This document covers everything specific to the two retrieval-facing tools,
 retrieval-layer behavior against the corpus directly, harness bugs the RAG
 questions surfaced, and eval-harness-level findings about how a model
 actually uses these two tools. Status: covers the 16-question
-`questions_rag.py` set and the retrieval-layer testing in
-`scripts/test_retrieval.py` that preceded it.
+`questions_rag.py` set, the retrieval-layer testing in
+`scripts/test_retrieval.py` that preceded it, and the quantified
+`scripts/recall_at_k.py` benchmark.
 
 ## Raw retrieval-layer behavior (`scripts/test_retrieval.py` against the corpus directly)
 
@@ -265,6 +266,106 @@ case above predicted from raw SQL testing: a query whose surface wording
 matches the *destination* office's vocabulary out-competes the *origin*
 office's differently-worded but causally correct chunks, and a narrow
 `top_k` never gives the origin a chance to surface.
+
+## Recall@k benchmark (`scripts/recall_at_k.py`)
+
+Every finding above is a case study -- eyeball the top-5 for one query,
+decide if it looks right. `scripts/recall_at_k.py` turns that into an actual
+number: given a labeled ground-truth relevant set (computed live via a SQL
+`ILIKE` scan, same discipline as every ground-truth check elsewhere in this
+document -- chunk_ids are `BIGSERIAL` and not stable across reseeds, so
+nothing is hardcoded), what fraction of it shows up in the top-*k* results
+for k = 5/10/20/50?
+
+**Ridge/heat multi-hop chain** (236 ground-truth chunks across the 7 offices
+on the documented path):
+
+| k | recall |
+|---|---|
+| 5 | 1.7% |
+| 10 | 2.5% |
+| 20 | 4.7% |
+| 50 | 13.1% |
+
+This is the quantified version of the multi-hop-causality finding above --
+single-query top-k structurally cannot cover this ground truth even at
+k=50.
+
+**Office-scoped topical search (KLIX)** -- this one caught the benchmark
+case itself going stale, not just the retriever:
+
+| k | recall |
+|---|---|
+| 5 | 2.8% |
+| 10 | 13.9% |
+| 20 | 16.7% |
+| 50 | 27.8% |
+
+The original "clean" version of this case (above) was run against an
+earlier, smaller corpus state. Checked directly against the current top-5:
+4 of 5 results are now **KCAE** (Columbia, SC), not KLIX -- the office
+backfill for the ridge-chain case, plus repeated `--corpus-mode drift`
+reseeding since, added KCAE `KEY_MESSAGES` chunks ("...dangerous heat...",
+distance 0.3002) that now out-rank KLIX's actual content for this exact
+query wording. The recall number is real, but the case it's measuring
+drifted out from under it -- a live reminder that a "clean" retrieval
+example is a snapshot of one corpus state, not a permanent property of the
+query.
+
+There's also a structural limitation in the method itself, not just this
+one case: ground truth here is keyword-matched (`ILIKE '%severe%'` etc.), so
+a genuinely on-topic chunk worded differently (e.g. "storms" instead of
+"thunderstorm") won't count as a hit even when it's the right answer --
+recall@k is only as honest as the label, and keyword labels undercount
+paraphrases. A semantic/LLM-judged ground-truth set would fix this but
+costs real money per case; the keyword approach is the free, repeatable
+first pass.
+
+**A likely bigger factor than either case above admits on its own:** see
+"Duplicate-chunk corpus finding" below -- with 47.1% of the corpus being
+exact-text duplicates from AFD reissuance, a meaningful fraction of any
+`top_k` slot count is spent on redundant copies rather than distinct
+relevant content, which drags every recall@k number down independent of how
+good the embedding/ranking itself is. Re-running this benchmark after a
+dedup fix (ingest-time or retrieval-time) is the natural next step -- it
+would isolate how much of the current low recall is "retrieval doesn't find
+enough distinct relevant content" versus "retrieval finds it, but wastes
+slots on copies of things it already found."
+
+## Duplicate-chunk corpus finding
+
+Checked directly in response to a hypothesis that chunking was
+double-extracting `KEY_MESSAGES` from both the header and body of a single
+AFD (i.e. a `chunking.py` bug). That specific mechanism does **not**
+happen: zero of 159 products with a `KEY_MESSAGES` chunk have a
+near-duplicate pair *within* the same `product_id` -- the regex in
+`_build_section_chunks` isn't double-chunking one discussion.
+
+The underlying concern was right, though, and the real cause is larger:
+grouping every chunk in the corpus by `(issuing_office, chunk_type,
+subsection)` and checking for exact-text repeats (whitespace-normalized)
+turns up **899 of 1,909 chunks (47.1%) as an exact-text duplicate of an
+earlier chunk in the same group** -- e.g. a KBOU `AVIATION` chunk issued at
+17:55 and again, byte-for-byte identical, at 19:48 the same day. This is a
+**reissuance** artifact, not a within-product chunking bug: NWS reissues an
+AFD every few hours, and sections like `AVIATION` or `KEY_MESSAGES` often go
+out completely unchanged between reissuances. `ingest.py`/`seed_db.py`
+store every reissuance as its own row with no dedup step, so roughly half
+the corpus is redundant copies of a much smaller set of distinct
+statements.
+
+**Why this plausibly matters more for recall than anything at the chunking
+layer**: every duplicate chunk that lands in a `top_k` result is a slot not
+spent on a distinct piece of relevant content -- the "2 near-identical
+Key Messages costing you a spot" intuition that motivated this check is
+real, it's just happening across reissuances (different `product_id`s) at a
+much larger scale (47% of the corpus) than within one discussion. Not yet
+fixed -- candidate approaches, not yet built or compared: (a) ingest-time
+dedup, skip inserting a chunk whose normalized text already exists for the
+same `(office, chunk_type, subsection)` within some recency window, or
+(b) retrieval-time dedup, drop near-duplicate rows from a candidate set
+before truncating to `top_k`. The recall@k benchmark above is the natural
+before/after measurement once one of these is built.
 
 ## Eval-harness-level findings: how a model actually uses these two tools
 
