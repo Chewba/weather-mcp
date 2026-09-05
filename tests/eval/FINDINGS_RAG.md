@@ -12,9 +12,11 @@ actually uses these two tools. Status: covers the 16-question
 the retrieval-layer testing in `scripts/test_retrieval.py` that preceded
 it, the quantified `scripts/recall_at_k.py` benchmark, the corpus
 overhaul (`scripts/build_test_data.py` + ingest-time dedup, then the
-original ridge-narrative data merged back in), and a v3 adaptive-retrieval
-attempt (docstring nudge, then office-diversified retrieval) that followed
-from it. The corpus is now 239 products / 1,457 chunks spanning real
+original ridge-narrative data merged back in), a v3 adaptive-retrieval
+attempt (docstring nudge, then office-diversified retrieval), and a
+one-off chunking-quality audit (`scripts/audit_chunking.py`) that found
+and fixed two real chunking bugs, including a silent content-loss one.
+The corpus is now 239 products / 1,457 chunks spanning real
 distinct days plus the hand-verified ridge chain, at a 0.1% duplicate rate
 (was 47.1%).
 
@@ -722,3 +724,139 @@ center?") rather than something more retrieval tuning fixes.
 `search_forecast_history` call with `top_k=20` now scans 400 rows via the
 pgvector index instead of 20 -- cheap at today's ~1,457-chunk corpus size,
 worth revisiting if the corpus grows by orders of magnitude.
+
+## Chunking quality audit (`scripts/audit_chunking.py`) -- real bugs found and fixed
+
+Followed up on the user's original chunking question from earlier in this
+document (the header/body duplicate-`KEY_MESSAGES` hypothesis, disproven,
+see "Duplicate-chunk corpus finding" above) with a more direct check: is the
+deterministic regex chunker (`rag/chunking.py`) actually producing
+coherent, correctly-labeled chunks at all? Built a one-off audit script
+(not wired into `run_eval.py` or CI, since chunking logic doesn't change
+between eval runs): samples ~8 discussions spread across text length, runs
+the real `parse_chunks()` directly (no DB, no network), checks for
+obviously-broken output for free (coverage, tiny/empty chunks, in-discussion
+duplicates), then gets one bounded LLM judge score (0-10, not averaged --
+this is a one-time audit, not a repeated benchmark) per discussion with a
+full raw-text-vs-chunks comparison.
+
+**First run: avg judge score 4.2/10 across 8 discussions.** Investigating
+the critiques directly against the raw AFD text (not just trusting the
+judge) found two real, previously-undocumented, root-caused bugs:
+
+1. **Silent, complete section loss (the worst finding of this whole
+   project's RAG work).** One sampled discussion (KLOX/Los Angeles-Oxnard)
+   scored 1/10 -- "the entire SHORT TERM and LONG TERM sections... are
+   missing from the chunks entirely." Root cause: that office's house style
+   writes section headers as `.SHORT TERM (TDY-TUE)...` -- a parenthetical
+   time-range qualifier between the section name and the required `...`.
+   The chunking regex's name-capture group didn't tolerate parentheses (it
+   already had a fix for a slash-delimited qualifier, e.g.
+   `AVIATION /12Z SUNDAY THROUGH THURSDAY/...`, per an existing regression
+   test -- this was the same class of bug via a different qualifier shape),
+   so the header simply failed to match at all, and `_build_section_chunks`
+   returned zero chunks for that entire block -- not mislabeled, not
+   merged, just gone. This is real, substantive forecast content (including
+   a tropical-system watch) silently dropped from the corpus, never
+   ingested, never retrievable, with no error anywhere in the pipeline.
+2. **Trailing forecaster-attribution footer parsed as real content, in
+   nearly every sample.** Every AFD ends with a signature block after the
+   final `$$` marker (e.g. `PUBLIC...MW/BL`, `AVIATION...Rorke`), and
+   `parse_chunks` was explicitly including that text as parseable sections
+   (`if len(first_chunk) > 1: sections.extend(first_chunk[1].split(...))`).
+   That footer matches the section-header regex closely enough that
+   forecaster initials get parsed as if they were real section content,
+   producing garbled duplicate-labeled chunks like `[LONG_TERM]
+   "Shamburger.Shamburger"` or `[AVIATION] "Kuhlman"` that pollute the
+   corpus with meaningless embeddings under real section-type labels. This
+   wasn't a one-off: it showed up in 6 of the 8 sampled discussions.
+   Checking why the code included that text at all found a real
+   complication, not just an oversight: 10 of 239 fixture records have
+   *two* `$$` markers, and the text *between* them is real content (a
+   4,292-char `DISCUSSION` section, verified directly on a KRAH record) --
+   so `$$` isn't purely an end-of-product marker for every office, it's
+   also used as a mid-document section separator sometimes. The original
+   code's `first_chunk[1]`-only logic happened to work for the two-`$$`
+   case by accident (it grabbed the real middle content and never touched
+   the actual trailing footer), while silently breaking the far more common
+   one-`$$` case (215 of 239 records) where `first_chunk[1]` *is* the
+   footer.
+
+**Fixes applied** (`src/weather_mcp/rag/chunking.py`, tests added in
+`tests/rag/test_chunking.py`):
+- The header regex now tolerates a parenthetical qualifier the same way it
+  already tolerated a slash-delimited one:
+  `([A-Z1-9 ]+)(?:\s*\([^)]*\))?(?:\s*/[^/\n]*/)?\.\.\.`, mirrored in the
+  lookahead too.
+- `parse_chunks` now always drops only the text after the *last* `$$`
+  marker (the true signature footer) and keeps everything before it as
+  real content -- correct for both the one-`$$` and multi-`$$` cases,
+  instead of the old `first_chunk[1]`-only logic that only happened to be
+  right for one of them.
+- Fixing the regex above surfaced a third, related latent bug: with SHORT
+  TERM and LONG TERM headers now both matching (previously neither did),
+  the existing "fold a section's bare intro line into the first numbered
+  sub-item" logic unconditionally merged *any* two matches in the same call
+  together -- which silently merged SHORT TERM's content into LONG TERM's
+  chunk and discarded the SHORT TERM label whenever two distinctly-named
+  sections shared one `&&`-delimited block (no numbered sub-items
+  involved). Fixed by only folding when the second match came from the
+  bare-numbered-item branch (empty name group), not a second named header.
+  This also caught an existing test (`test_parse_chunks_builds_header_and_
+  section_chunks_in_order`) that had encoded the old, wrong assumption --
+  updated it to assert the two sections stay separate, matching the
+  real-data-verified correct behavior.
+
+**Second run, same 8-discussion sample: avg judge score 5.8/10 (up from
+4.2/10).** The KLOX content-loss case went from the worst score (1/10) to
+8/10; the garbled-attribution chunks disappeared from every sample. One
+judge critique on this second run was itself a false positive worth
+recording: it claimed KSHV's "DISCUSSION section's actual body content is
+dropped entirely" -- checking the actual chunk list directly showed the
+DISCUSSION chunk present with 3,528 characters of real, correctly-labeled
+content; the judge had been confused by an unrelated empty artifact chunk
+sitting nearby in the list (see below) into misreading the whole section as
+missing. Consistent with this document's earlier "`quality_score` is not
+reliable enough to stand alone" finding -- here it produced a *false
+positive defect report*, the mirror image of scoring a wrong answer highly,
+and another reason the audit script's free deterministic checks and direct
+verification against ground truth matter as much as the LLM judge's score.
+
+**One known issue found but deliberately not fixed in this pass:** AFDs
+almost always open with a teaser line like `...New AVIATION...` or `...New
+SHORT TERM, LONG TERM, AVIATION, MARINE...` announcing which sections
+changed since the last issuance. The regex's greedy name-capture backtracks
+to match just the *last* all-caps word before the `...` (since intervening
+comma-separated words don't have their own `...` immediately after them),
+producing one small, real-but-content-free chunk per discussion (e.g.
+`[AVIATION / AVIATION] ""`) under a real section-type label. Root-caused
+and confirmed low severity: it never drops or corrupts real content, unlike
+the two bugs above -- just adds one degenerate empty-text chunk per
+discussion. Worth filtering (e.g. skip appending a chunk whose stripped
+`chunk_text` is empty) as a future follow-up.
+
+**Reseeded and re-verified against `recall_at_k.py` -- a genuine null
+result on the existing benchmark, and here's why.** Reset the DB and
+reseeded from `test_data.json` with the fixed chunker (`seed_db.py
+--strict`, corpus unchanged, only the parsing logic differs): 239 products,
+1,346 chunks (down from 1,457 -- net effect of removing footer-garbage
+chunks and merging fewer duplicate-labeled fragments, partially offset by
+newly-recovered previously-dropped content), 29 known empty
+teaser-line chunks remain (the deferred issue above). Re-running
+`recall_at_k.py`'s ridge/heat multi-hop case against this corpus produced
+**numbers identical to the pre-chunking-fix state, to the decimal point**:
+205 ground-truth chunks, recall@5/10/20/50 = 2.0% / 3.9% / 6.8% / 17.1% --
+exactly the "After (deduped, merged)" row from the table above. This is a
+real, verified null result, not a failure to rerun correctly: the
+KLOX-style parenthetical-header bug was found on an office (Los
+Angeles-Oxnard) that isn't one of the 7 offices this benchmark's ground
+truth is scoped to, and the footer-garbage chunks removed by the other fix
+were never semantically close enough to a ridge/heat query to occupy a
+top-50 slot in either corpus state. Real bugs, independently confirmed via
+the audit script's before/after judge scores (4.2 -> 5.8/10) -- just not
+ones this particular pre-existing benchmark case happens to be sensitive
+to. A benchmark case specifically targeting a discussion known to use the
+parenthetical-header format (e.g. a KLOX-scoped query) would be needed to
+show this fix's effect on a recall@k number directly; not built here, since
+that would mean hand-verifying a new ground-truth set the same way the
+existing two cases were.
