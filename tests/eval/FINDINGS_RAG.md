@@ -10,11 +10,13 @@ questions surfaced, and eval-harness-level findings about how a model
 actually uses these two tools. Status: covers the 16-question
 `questions_rag.py` set (re-run end-to-end after the corpus overhaul below),
 the retrieval-layer testing in `scripts/test_retrieval.py` that preceded
-it, the quantified `scripts/recall_at_k.py` benchmark, and the corpus
+it, the quantified `scripts/recall_at_k.py` benchmark, the corpus
 overhaul (`scripts/build_test_data.py` + ingest-time dedup, then the
-original ridge-narrative data merged back in) that followed from it. The
-corpus is now 239 products / 1,457 chunks spanning real distinct days plus
-the hand-verified ridge chain, at a 0.1% duplicate rate (was 47.1%).
+original ridge-narrative data merged back in), and a v3 adaptive-retrieval
+attempt (docstring nudge, then office-diversified retrieval) that followed
+from it. The corpus is now 239 products / 1,457 chunks spanning real
+distinct days plus the hand-verified ridge chain, at a 0.1% duplicate rate
+(was 47.1%).
 
 ## Raw retrieval-layer behavior (`scripts/test_retrieval.py` against the corpus directly)
 
@@ -595,7 +597,7 @@ one (zero tool calls, answered from outside knowledge, plus an odd aside
 asking whether this was "for the evaluation harness") -- worth a follow-up
 run to see if that's consistent.
 
-## Future work: adaptive/multi-hop retrieval (v3)
+## v3: adaptive/multi-hop retrieval -- attempted, partial improvement, real bottleneck found
 
 The multi-hop-causality case above is the concrete evidence for this:
 single-pass top-k over one query embedding is structurally the wrong tool
@@ -607,14 +609,116 @@ identify the relevant office(s) and time window, then issues a second,
 differently-worded query (e.g. swap "heat" for "ridge"/"upstream cause") or
 diversifies by office before handing chunks to the LLM.
 
-**Update after the eval-harness runs above**: given the freedom to make
-several tool calls, the model already approximated this diversify-by-query
-strategy on its own for the full-chain question -- 3 differently-worded
-searches with a wide self-selected `top_k` got 6 of 7 offices in the correct
-order, but the narrower origin-office question still failed at default
-`top_k`. Before building new adaptive retrieval code, worth testing whether
-a docstring nudge toward multi-query search for tracing/pattern questions
-gets most of the benefit for far less engineering cost -- this dataset (16
-offices, a real traceable west-to-east chain, and both a documented
-single-pass failure and a documented spontaneous-success) is a good fixed
-benchmark for that work either way.
+Given the freedom to make several tool calls, the model had already
+approximated a diversify-by-query strategy on its own for the full-chain
+question in an earlier run -- 3 differently-worded searches with a wide
+self-selected `top_k` got 6 of 7 offices in the correct order, but the
+narrower origin-office question still failed at default `top_k`. Two
+regression questions exist for exactly this in `questions_rag.py`, both with
+`expected_facts` for a deterministic (non-judge) check:
+- "Which NWS office first reported the ridge...?" -- `must_mention: {"KFWD": 10}`
+- "List, in order, every NWS office that mentioned this ridge." -- `ordered_sequence` KFWD→KSHV→KMEG→KOHX→KFFC→KCAE→KRAH
+
+Two things were tried, in the order the user asked for: a docstring nudge
+first (cheap, no retrieval-code risk), and only if that didn't reach 100%,
+actual adaptive retrieval code. It didn't, so both were built and compared.
+
+### Attempt 1: docstring nudge only, no code change
+
+Added guidance to both tools' docstrings: for origin/pattern-tracing
+questions, don't stop at one call or one wording -- issue 2-3
+differently-worded queries with a higher `top_k`, and (for
+`explain_forecast_reasoning`) don't assume the office named in the question
+is the origin just because it's the one being asked about.
+
+Re-running the two regression questions in isolation (`--filter`, added to
+`run_eval.py` this session so a retry can target one or two questions
+instead of re-spending usage on the full 16):
+
+| question | tool calls made | fact_score |
+|---|---|---|
+| origin-office | 1 call, `search_forecast_history` unscoped | 0 (named KOHX, wrong) |
+| full-chain | 1 call, `top_k=20` | 5 (unchanged from the pre-docstring baseline) |
+
+The model did not follow the nudge in either case -- it still made exactly
+one call each time. Docstring guidance alone did not reach 100% (or move
+the needle at all), so per the user's direction, adaptive retrieval code
+was the next step.
+
+### Attempt 2: adaptive office-diversified retrieval
+
+Implemented in `rag/retrieve.py`: when `search_forecast_history` is called
+without an `office_id`, it now fetches a much wider raw candidate pool
+(`top_k * 20`) and caps how many chunks any single office can contribute to
+the final result (3 per office) before returning -- see
+`DIVERSIFY_CANDIDATE_MULTIPLIER`, `DIVERSIFY_PER_OFFICE_CAP`, and
+`_diversify_by_office()`. This directly targets the documented root cause
+(one office's vocabulary dominating raw top-k), not a guess at synonyms.
+Verified live before re-running the eval: for the origin question's exact
+query, diversified top-20 results now include KFWD (positions 16-19);
+undiversified top-15 raw search did not surface it at all, per the original
+finding above.
+
+Re-running the same two questions with diversification live:
+
+| question | tool calls made | fact_score |
+|---|---|---|
+| origin-office | 1 call | 10 (see caveat below) |
+| full-chain | 4 differently-worded calls | 6 (up from 5) |
+
+At face value this looks like a clean win. It isn't, fully:
+
+- **The origin-office "10" is a false positive in the eval's own fact-check
+  design, not a correctness win.** The model's answer still explicitly
+  states "**KMEG** first reported the ridge" -- wrong, ground truth is KFWD
+  -- and only mentions KFWD later, as one stop in its (also wrong-ordered)
+  timeline. `expected_facts: {"must_mention": {"KFWD": 10}}` only checks
+  that the string "KFWD" appears anywhere in the answer, not that it's
+  named as the answer to "which office is first." Diversified retrieval
+  successfully got KFWD's chunks in front of the model (it wasn't there
+  before at all); the model still reasoned about them incorrectly, and the
+  fact-check didn't catch that. **This is a real gap in `grade_facts`**
+  worth fixing if this project continues: `must_mention` is too weak for
+  "identify the single correct entity" questions -- something like
+  requiring the correct office to be the first NWS office code mentioned in
+  the answer would catch this.
+- **The full-chain answer improved but is still wrong**: 6 of the 7 correct
+  offices appear (KFWD, KSHV, KMEG, KOHX, KFFC, KRAH), but KCAE is missing,
+  KLIX is a false-positive intrusion (never part of the documented chain),
+  and the order doesn't match the ground-truth sequence. Genuinely better
+  than the docstring-only attempt (single call, `top_k=20`, no reasoning
+  visible) -- this run made 4 differently-worded calls, so the docstring
+  nudge *did* fire here, just not in isolation.
+
+### Why this isn't purely a retrieval problem
+
+Checking the raw ground truth directly explains why: querying the DB for
+each of the 7 chain offices' earliest chunk mentioning "ridge" shows all 7
+clustered within a 90-minute window on the same morning (Aug 27, 17:00-18:40
+UTC), except KOHX (a day later). A ridge aloft is a synoptic-scale feature
+visible in the same upper-air analysis to every regional forecast office at
+once -- it doesn't "arrive" at each office sequentially the way a moving
+storm would, so "who mentioned the word ridge first" is not, by itself, a
+valid way to find the origin. The real signal is qualitative: KFWD's
+earliest chunk explicitly says "the center of the sprawling upper high...
+will become **re-established** over the Southern and Central Plains" --
+i.e. KFWD's own text identifies itself as the ridge's center. KMEG's
+earliest matching chunk, from ~100 minutes earlier, mentions "ridge" only
+in a secondary/downstream context. Distinguishing those two requires
+weighing *where a system is centered* against *who happened to type a
+keyword first* -- a semantic-reasoning judgment call over already-retrieved
+text, not a retrieval-ranking problem. Office-diversified retrieval can
+guarantee the right chunk is in front of the model; it cannot make the
+model weigh "centered over" language correctly once it's there. That
+reasoning gap is the actual remaining bottleneck, and it sits above the
+retrieval layer entirely -- likely v4 territory (e.g. chunk-level metadata
+flagging spatial/center language, or a structured second pass that asks
+specifically "which of these offices describes itself as the ridge's
+center?") rather than something more retrieval tuning fixes.
+
+### Cost/scaling note
+
+`DIVERSIFY_CANDIDATE_MULTIPLIER = 20` means an unscoped
+`search_forecast_history` call with `top_k=20` now scans 400 rows via the
+pgvector index instead of 20 -- cheap at today's ~1,457-chunk corpus size,
+worth revisiting if the corpus grows by orders of magnitude.

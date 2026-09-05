@@ -82,10 +82,14 @@ docker exec -it weather-mcp-db-1 psql -U weather-mcp-user -d weather-mcp -c "\dt
 Known gap, not yet built: no tool resolves a place name (city/state) to the
 NWS office identifier the two retrieval tools require — a model has to
 already know or be told the office code (e.g. `KRAH`) rather than guessing
-it from "Raleigh, NC." Also intentionally out of scope for now: adaptive/
-multi-hop retrieval (issuing follow-up queries automatically for
-causality-tracing questions) — see [`tests/eval/FINDINGS_RAG.md`](tests/eval/FINDINGS_RAG.md)'s
-"Future work" section.
+it from "Raleigh, NC." `search_forecast_history` also diversifies results
+across offices (capped per office) when called without an `office_id`, so a
+single office's vocabulary can't crowd out the rest of a cross-office
+pattern — but for causality/origin-tracing questions specifically, correct
+retrieval turned out to be necessary but not sufficient: see
+[`tests/eval/FINDINGS_RAG.md`](tests/eval/FINDINGS_RAG.md)'s "v3: adaptive/
+multi-hop retrieval" section for the full experiment and the reasoning-layer
+bottleneck found underneath it.
 
 Full RAG-specific eval findings — raw retrieval-layer behavior, harness bugs
 the RAG questions surfaced, and how a model actually uses these two tools —

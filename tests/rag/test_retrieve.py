@@ -95,3 +95,62 @@ async def test_retrieve_chunks_returns_dicts_with_expected_fields(monkeypatch):
         "chunk_text": f"text for KRAH at {_dt(31, 10)}",
         "distance": 0.52,
     }]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_diversify_widens_candidate_pool(monkeypatch):
+    captured = {}
+
+    async def fake_search_chunks(query, office_id=None, top_k=5):
+        captured["top_k"] = top_k
+        return []
+
+    monkeypatch.setattr(retrieve, "search_chunks", fake_search_chunks)
+
+    await retrieve.retrieve_chunks("ridge of high pressure", top_k=5, diversify_offices=True)
+
+    assert captured["top_k"] == 5 * retrieve.DIVERSIFY_CANDIDATE_MULTIPLIER
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_diversify_caps_chunks_per_office(monkeypatch):
+    """Regression test for the documented failure: one office's chunks
+    dominating raw distance order must not fill every slot once diversify_offices
+    is on -- other offices with worse (but still relevant) distance scores
+    need a chance to appear."""
+    candidates = (
+        [_row("KRAH", 0.10 + i * 0.001, _dt(31, 10)) for i in range(10)]
+        + [_row("KFWD", 0.20, _dt(27, 9))]
+        + [_row("KMEG", 0.21, _dt(29, 12))]
+    )
+
+    async def fake_search_chunks(query, office_id=None, top_k=5):
+        return candidates
+
+    monkeypatch.setattr(retrieve, "search_chunks", fake_search_chunks)
+
+    results = await retrieve.retrieve_chunks("ridge of high pressure", top_k=5, diversify_offices=True)
+
+    offices = [r["issuing_office"] for r in results]
+    assert offices.count("KRAH") <= retrieve.DIVERSIFY_PER_OFFICE_CAP
+    assert "KFWD" in offices
+    assert "KMEG" in offices
+
+
+@pytest.mark.asyncio
+async def test_retrieve_chunks_diversify_ignored_when_office_id_given(monkeypatch):
+    captured = {}
+
+    async def fake_search_chunks(query, office_id=None, top_k=5):
+        captured["top_k"] = top_k
+        return [_row("KRAH", 0.52, _dt(31, 10))]
+
+    monkeypatch.setattr(retrieve, "search_chunks", fake_search_chunks)
+
+    await retrieve.retrieve_chunks(
+        "ridge of high pressure", office_id="KRAH", top_k=5, boost_recency=False, diversify_offices=True
+    )
+
+    # scoped to one office already -- diversifying across offices is meaningless,
+    # so it should behave exactly like a plain top_k call
+    assert captured["top_k"] == 5

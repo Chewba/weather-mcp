@@ -130,7 +130,15 @@ async def explain_forecast_reasoning(query: str, office_id: str, top_k: int = 5)
     use search_forecast_history without an office_id for that instead, and
     expect it to need multiple calls, not one. For today's live forecaster
     discussion rather than search over past ones, use get_weather_discussion
-    instead."""
+    instead.
+
+    If the question asks where a pattern ORIGINATED (not just how it changed
+    at the one office named in the question), do not assume that office is
+    the origin and stop here -- that office's own vocabulary for the event
+    will dominate its results and can mask an earlier mention elsewhere.
+    First use search_forecast_history (unscoped, and see its docstring for
+    wording multiple queries) to find candidate origin offices, then call
+    this tool per candidate office to confirm chronology."""
     chunks = await retrieve_chunks(query, office_id=office_id, top_k=top_k, boost_recency=True)
     response = "Relevant forecast reasoning passages:\n\n"
     for chunk in chunks:
@@ -166,8 +174,27 @@ async def search_forecast_history(query: str, office_id: str | None = None, top_
     covers offices/time periods that happen to have been ingested already
     and may return nothing even for a real, valid office_id or a real
     weather event. For today's live forecaster discussion rather than search
-    over past ones, use get_weather_discussion instead."""
-    chunks = await retrieve_chunks(query, office_id=office_id, top_k=top_k, boost_recency=False)
+    over past ones, use get_weather_discussion instead.
+
+    For questions that trace a pattern's ORIGIN or full path across offices
+    (e.g. "where did this start", "list every office that mentioned this"),
+    one call with one query wording is not enough: forecasters at different
+    offices, and at different stages of the same event, describe it with
+    different vocabulary (e.g. "ridge building" upstream vs. "heat advisory"
+    downstream). Issue at least 2-3 calls with differently-worded queries
+    (swap in synonyms for the phenomenon itself, not just the impact word)
+    and a higher top_k (20-30), then combine results across all calls and
+    compare issued_at timestamps and issuing_office -- don't conclude an
+    office is uninvolved from a single call's top results.
+
+    When office_id is omitted, results are automatically diversified across
+    offices (capped per office) rather than raw top-k, so a single office
+    whose wording happens to match the query most closely can't crowd out
+    every other office -- this still doesn't replace wording your query well,
+    but reduces how much a single call's phrasing matters."""
+    chunks = await retrieve_chunks(
+        query, office_id=office_id, top_k=top_k, boost_recency=False, diversify_offices=True
+    )
     response = "Relevant forecast passages:\n\n"
     for chunk in chunks:
         response += f"[{chunk['issuing_office']} / {chunk['chunk_type']} / {chunk['subsection']}] issued={chunk['issued_at']}\n"

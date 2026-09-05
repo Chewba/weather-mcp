@@ -76,18 +76,28 @@ PRICING_PER_MTOK_USD = {
 }
 
 
-def select_questions(question_set: str) -> list[tuple[dict, str]]:
+def select_questions(question_set: str, text_filter: str | None = None) -> list[tuple[dict, str]]:
     """Pairs each question with the tool allow-list it should run under, so
     a --question-set both run still scopes RAG questions away from
     get_weather_discussion/compare_forecasts (and vice versa) per-question,
-    not just for pure single-set runs."""
+    not just for pure single-set runs.
+
+    text_filter, if given, keeps only questions whose text contains it
+    (case-insensitive) -- lets a retry target one or two specific questions
+    (e.g. the v3 adaptive-retrieval benchmarks) without re-spending usage on
+    the full set."""
     if question_set == "mcp":
-        return [(q, MCP_TOOLS) for q in MCP_QUESTIONS]
-    if question_set == "rag":
-        return [(q, RAG_TOOLS) for q in RAG_QUESTIONS]
-    return [(q, MCP_TOOLS) for q in MCP_QUESTIONS] + [
-        (q, RAG_TOOLS) for q in RAG_QUESTIONS
-    ]
+        selected = [(q, MCP_TOOLS) for q in MCP_QUESTIONS]
+    elif question_set == "rag":
+        selected = [(q, RAG_TOOLS) for q in RAG_QUESTIONS]
+    else:
+        selected = [(q, MCP_TOOLS) for q in MCP_QUESTIONS] + [
+            (q, RAG_TOOLS) for q in RAG_QUESTIONS
+        ]
+    if text_filter:
+        needle = text_filter.lower()
+        selected = [(q, t) for q, t in selected if needle in q["question"].lower()]
+    return selected
 
 # ---------------------------------------------------------------------------
 # Shared: judge prompt construction, score averaging, cost reporting -- used
@@ -309,7 +319,7 @@ def run_headless_batch(args) -> None:
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
     fact_results = []
-    questions = select_questions(args.question_set)
+    questions = select_questions(args.question_set, args.filter)
     n = len(questions)
 
     for quest, allowed_tools in questions:
@@ -438,7 +448,7 @@ async def run_api_batch(args) -> None:
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
     fact_results = []
-    questions = select_questions(args.question_set)
+    questions = select_questions(args.question_set, args.filter)
     n = len(questions)
 
     async with (
@@ -559,6 +569,15 @@ if __name__ == "__main__":
             "reproducible RAG-tool corpus. drift: seed the golden fixture as a "
             "floor, then layer in the 10 most recent live discussions per "
             "office on top, without resetting existing data."
+        ),
+    )
+    parser.add_argument(
+        "--filter",
+        default=os.environ.get("EVAL_FILTER"),
+        help=(
+            "Only run questions whose text contains this substring "
+            "(case-insensitive). Useful for cheaply re-testing one or two "
+            "questions instead of a whole question set."
         ),
     )
     parser.add_argument(
