@@ -683,7 +683,12 @@ At face value this looks like a clean win. It isn't, fully:
   worth fixing if this project continues: `must_mention` is too weak for
   "identify the single correct entity" questions -- something like
   requiring the correct office to be the first NWS office code mentioned in
-  the answer would catch this.
+  the answer would catch this. **Fixed**: added a `first_mention` fact type
+  (`grading.py`) that only awards points if the expected office is the
+  earliest-appearing one among a candidate list, not just present anywhere;
+  the origin-office question now uses it instead of `must_mention`.
+  Verified directly against this exact answer text: `must_mention` scores
+  it a false-positive 10, `first_mention` correctly scores it 0.
 - **The full-chain answer improved but is still wrong**: 6 of the 7 correct
   offices appear (KFWD, KSHV, KMEG, KOHX, KFFC, KRAH), but KCAE is missing,
   KLIX is a false-positive intrusion (never part of the documented chain),

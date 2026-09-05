@@ -415,6 +415,14 @@ RAG_QUESTIONS = [
         # catches that; quality_score alone did not. This is the intended
         # regression benchmark for v3: re-run it once adaptive/multi-hop
         # retrieval exists and check whether fact_score actually improves.
+        #
+        # Second real finding: plain must_mention wasn't enough either. After
+        # office-diversified retrieval, one run's answer explicitly named
+        # KMEG as first (still wrong) but happened to mention KFWD later in
+        # its timeline -- must_mention: {"KFWD": 10} scored that a false-
+        # positive 10. Switched to first_mention, which only awards points if
+        # KFWD is the earliest-appearing office among the chain, not just
+        # present anywhere.
         "question": "Which NWS office first reported the ridge that eventually brought heat to Raleigh, and around when did it start?",
         "expected_calls": [
             {
@@ -442,7 +450,13 @@ RAG_QUESTIONS = [
                 "exclusive": "explain_krah",
             },
         ],
-        "expected_facts": {"must_mention": {"KFWD": 10}},
+        "expected_facts": {
+            "first_mention": {
+                "among": ["KFWD", "KSHV", "KMEG", "KOHX", "KFFC", "KCAE", "KRAH"],
+                "expected": "KFWD",
+                "points": 10,
+            }
+        },
     },
     {
         # v3 candidate #3: promoted directly from the "Future work" section

@@ -98,6 +98,16 @@ def grade_facts(final_answer: str, expected_facts: dict) -> int:
     (default 1); an `order_bonus` (default 0) is added if every found item
     appears in the correct relative order (missing items don't break this --
     a 6-of-7 chain found in the right order still earns the bonus).
+
+    `first_mention`: {"among": [...], "expected": fact, "points": N} --
+    awards `points` only if `expected` is the one from `among` that appears
+    EARLIEST in the answer (case-insensitive), not just present somewhere.
+    `must_mention` alone can't distinguish "correctly identifies X as the
+    answer" from "mentions X in passing while naming something else as the
+    answer" -- a real false positive seen in practice: an answer that named
+    the wrong office first but mentioned the right one later scored a full
+    `must_mention` match despite being wrong. Scores 0 if none of `among`
+    appears in the answer at all.
     """
     text = final_answer.lower()
     score = 0
@@ -105,6 +115,16 @@ def grade_facts(final_answer: str, expected_facts: dict) -> int:
     for fact, points in expected_facts.get("must_mention", {}).items():
         if fact.lower() in text:
             score += points
+
+    first_mention = expected_facts.get("first_mention")
+    if first_mention:
+        among = first_mention["among"]
+        positions = [(item, text.find(item.lower())) for item in among]
+        found = [(item, pos) for item, pos in positions if pos != -1]
+        if found:
+            earliest_item, _ = min(found, key=lambda pair: pair[1])
+            if earliest_item == first_mention["expected"]:
+                score += first_mention.get("points", 10)
 
     ordered = expected_facts.get("ordered_sequence")
     if ordered:

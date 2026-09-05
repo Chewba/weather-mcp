@@ -215,3 +215,29 @@ def test_ordered_sequence_no_matches_scores_zero():
 def test_ordered_sequence_single_match_gets_no_order_bonus():
     # Order bonus requires at least two found items to mean anything.
     assert grade_facts("Only KFWD is mentioned.", CHAIN_FACTS) == 1
+
+
+FIRST_MENTION_FACTS = {
+    "first_mention": {
+        "among": ["KFWD", "KSHV", "KMEG", "KOHX", "KFFC", "KCAE", "KRAH"],
+        "expected": "KFWD",
+        "points": 10,
+    }
+}
+
+
+def test_first_mention_expected_office_named_first_scores_full():
+    answer = "KFWD first reported the ridge, which later reached KRAH."
+    assert grade_facts(answer, FIRST_MENTION_FACTS) == 10
+
+
+def test_first_mention_wrong_office_named_first_scores_zero():
+    # Real observed false positive this was added to fix: must_mention alone
+    # scored this a full 10 because KFWD appears somewhere in the text, even
+    # though the answer explicitly names KMEG -- the wrong office -- first.
+    answer = "KMEG first reported the ridge. It later reached KFWD and then KRAH."
+    assert grade_facts(answer, FIRST_MENTION_FACTS) == 0
+
+
+def test_first_mention_no_candidates_present_scores_zero():
+    assert grade_facts("No offices are named here at all.", FIRST_MENTION_FACTS) == 0
