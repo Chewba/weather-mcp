@@ -11,6 +11,7 @@ from weather_mcp.config import USER_AGENT
 from weather_mcp.errors import WeatherMcpError
 from weather_mcp.geocode import get_coordinates
 from weather_mcp.rag.ingest import ingest_discussion
+from weather_mcp.rag.retrieve import retrieve_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,79 @@ async def _get_daily_forecast(
         return "\n".join(forecast)
     except WeatherMcpError as e:
         return str(e)
+
+@mcp.tool()
+async def explain_forecast_reasoning(query: str, office_id: str, top_k: int = 5) -> str:
+    """Searches this office's PAST forecast discussions to explain WHY the
+    forecast looks the way it does or HOW the forecaster's reasoning changed
+    over time (e.g. "why is it so hot right now", "how did the outlook for
+    this weekend change this week"). Results are ordered chronologically
+    (oldest to newest) so you can trace a change across multiple discussions
+    -- this is what makes it different from search_forecast_history, which
+    ranks by relevance only and does not preserve time order. Does not
+    generate an explanation itself -- cite the returned passages (office,
+    date, section) and reason over them directly; don't state anything as
+    fact that isn't actually in the returned text.
+
+    office_id is REQUIRED and MUST be a National Weather Service office
+    identifier (e.g. "KRAH", "KLIX") -- NOT a city, state, or street address.
+    If you don't already know the correct office_id for the location being
+    asked about, do not guess one: there is no tool in this server that
+    resolves a place name to an office_id, and a wrong guess will silently
+    return another office's data. Say you don't have the office code rather
+    than fabricating one.
+
+    This searches previously-ingested history, not live data, and only
+    covers offices/time periods that happen to have been ingested already --
+    it may return nothing even for a real, valid office_id. It is also
+    scoped to exactly one office; it cannot trace a pattern (e.g. a heat wave
+    or storm system) as it moves across multiple offices' coverage areas --
+    use search_forecast_history without an office_id for that instead, and
+    expect it to need multiple calls, not one. For today's live forecaster
+    discussion rather than search over past ones, use get_weather_discussion
+    instead."""
+    chunks = await retrieve_chunks(query, office_id=office_id, top_k=top_k, boost_recency=True)
+    response = "Relevant forecast reasoning passages:\n\n"
+    for chunk in chunks:
+        response += f"[{chunk['issuing_office']} / {chunk['chunk_type']} / {chunk['subsection']}] issued={chunk['issued_at']}\n"
+        response += f"{chunk['chunk_text']}\n\n"
+    return response  # prose-ish, not raw JSON — same as v1
+
+@mcp.tool()
+async def search_forecast_history(query: str, office_id: str | None = None, top_k: int = 5) -> str:
+    """Semantic search over previously-ingested forecast discussions, ranked
+    by topical relevance only (no chronological ordering) -- best for "what
+    has been said about X" or tracking a pattern (e.g. a heat wave or storm
+    system) as it potentially moves across multiple offices. For "why did
+    this change" or "how did the reasoning evolve" questions about ONE
+    specific office, use explain_forecast_reasoning instead -- its
+    chronological ordering is a better fit and results won't come back
+    scattered out of time order. Does not generate an answer itself -- cite
+    the returned passages (office, date, section) and reason over them
+    directly; don't state anything as fact that isn't actually in the
+    returned text.
+
+    office_id is OPTIONAL. If provided, it MUST be a National Weather
+    Service office identifier (e.g. "KRAH", "KLIX") -- NOT a city, state, or
+    street address. If you don't know the correct office_id for a specific
+    location, omit it rather than guessing: a wrong guess silently searches
+    the wrong office's data instead of erroring. Omitting office_id searches
+    the entire corpus across all ingested offices, which is the right choice
+    for cross-country or multi-location questions -- to compare two known
+    offices directly, call this tool once per office_id rather than making
+    one combined query.
+
+    This searches previously-ingested history, not live data -- it only
+    covers offices/time periods that happen to have been ingested already
+    and may return nothing even for a real, valid office_id or a real
+    weather event. For today's live forecaster discussion rather than search
+    over past ones, use get_weather_discussion instead."""
+    chunks = await retrieve_chunks(query, office_id=office_id, top_k=top_k, boost_recency=False)
+    response = "Relevant forecast passages:\n\n"
+    for chunk in chunks:
+        response += f"[{chunk['issuing_office']} / {chunk['chunk_type']} / {chunk['subsection']}] issued={chunk['issued_at']}\n"
+        response += f"{chunk['chunk_text']}\n\n"
+    return response
 
 
 def main() -> None:

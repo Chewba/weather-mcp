@@ -1,8 +1,9 @@
-"""Shared eval question set, referenced by any harness that scores this server's
-tool-selection behavior -- headless CLI (run_cli.py) or direct API calls (run.py) --
-so results are comparable against the same dataset regardless of how the model is invoked."""
+"""Eval question set for the original, non-RAG weather-mcp tools
+(forecast/conditions/alerts/discussion/compare). Referenced by run_eval.py
+via --question-set mcp|both. Split out from questions_rag.py so a run scoped
+to just one tool family does not re-spend usage re-testing the other."""
 
-TESTING_DATA = [
+MCP_QUESTIONS = [
     {
         "question": "What is the weather in Kansas City, MO?",
         "expected_calls": [

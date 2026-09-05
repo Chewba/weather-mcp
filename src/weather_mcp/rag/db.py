@@ -2,6 +2,7 @@ import asyncpg
 from pgvector.asyncpg import register_vector
 
 from weather_mcp import config
+from weather_mcp.rag.embeddings import encode_vectors
 
 
 async def _init_conn(conn):
@@ -23,6 +24,15 @@ async def get_pool() -> asyncpg.Pool:
         )
     return _pool
 
+async def reset_db() -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            TRUNCATE TABLE weather_discussion_chunks
+                        , weather_discussion_products;
+            """
+        )
 
 async def upsert_office(
     pool: asyncpg.Pool,
@@ -142,6 +152,44 @@ async def upsert_discussion_chunk(
     )
     return response
 
+def _normalize_chunk_text(text: str) -> str:
+    return " ".join(text.split()).lower()
+
+
+async def filter_new_chunks(pool: asyncpg.Pool, chunks: list[dict]) -> list[dict]:
+    """Drops any chunk whose normalized text already exists for the same
+    (issuing_office, chunk_type, subsection). NWS reissues an AFD every few
+    hours and often repeats a section verbatim between reissuances -- without
+    this, a live-seeded corpus ends up with a large fraction of chunks being
+    exact-text duplicates of an earlier one (see tests/eval/FINDINGS_RAG.md's
+    "Duplicate-chunk corpus finding": 47.1% of chunks, before this fix).
+    One query per discussion (all of one office's existing chunks), then a
+    pure-Python set check -- cheap relative to the embedding call already
+    paid for every chunk in `chunks`, and easy to unit test without needing
+    to fake a sequence of per-chunk DB round trips."""
+    if not chunks:
+        return chunks
+    office_id = chunks[0]["issuing_office"]
+    rows = await pool.fetch(
+        """
+        SELECT chunk_type, subsection, chunk_text
+        FROM weather_discussion_chunks
+        WHERE issuing_office = $1
+        """,
+        office_id,
+    )
+    existing = {
+        (row["chunk_type"], row["subsection"], _normalize_chunk_text(row["chunk_text"]))
+        for row in rows
+    }
+    return [
+        chunk
+        for chunk in chunks
+        if (chunk["chunk_type"], chunk["subsection"], _normalize_chunk_text(chunk["chunk_text"]))
+        not in existing
+    ]
+
+
 async def get_discussion_chunk(pool:asyncpg.Pool, chunk_id: int) -> asyncpg.Record:
     discussion_data = await pool.fetchrow(
         """
@@ -168,3 +216,26 @@ async def get_discussion_chunk(pool:asyncpg.Pool, chunk_id: int) -> asyncpg.Reco
         chunk_id,
     )
     return discussion_data
+
+async def search_chunks(query: str, office_id: str | None = None, top_k: int = 5) -> list[asyncpg.Record]:
+    pool = await get_pool()
+    query_embedding = encode_vectors([query])[0]
+    where_clause = "WHERE issuing_office = $3" if office_id else ""
+    sql = f"""
+            SELECT
+                issuing_office,
+                chunk_type,
+                subsection,
+                issued_at,
+                chunk_text,
+                embedding <=> $1 AS distance
+            FROM weather_discussion_chunks
+            {where_clause}
+            ORDER BY embedding <=> $1
+            LIMIT $2
+        """
+    if office_id:
+        rows = await pool.fetch(sql, query_embedding, top_k, office_id)
+    else:
+        rows = await pool.fetch(sql, query_embedding, top_k)
+    return rows

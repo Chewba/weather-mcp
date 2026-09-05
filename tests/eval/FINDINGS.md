@@ -1,8 +1,17 @@
 # weather-mcp Eval Harness: Methodology & Findings
 
-Status: covers work through the `run_eval.py` unification (headless + API
-backends, both now verified live) and the 16-question `questions.py` dataset.
-Update as more runs happen.
+Covers the shared eval-harness architecture and methodology, plus findings
+specific to the original six, non-RAG tools (`questions_mcp.py`, 16
+questions). For everything specific to the two RAG retrieval tools
+(`search_forecast_history`/`explain_forecast_reasoning`) -- harness bugs the
+RAG questions surfaced, retrieval-layer behavior, and RAG-specific
+eval-harness findings -- see [`FINDINGS_RAG.md`](FINDINGS_RAG.md). Status:
+covers work through the `run_eval.py` unification (headless + API backends,
+both now verified live), the 32-question dataset split across
+`questions_mcp.py` (16 original) and `questions_rag.py` (16 exercising the
+RAG tools), `grade_facts` for objectively-checkable questions, and per-set
+tool scoping (`--question-set mcp|rag|both`) to keep RAG-only runs from
+spending usage on the non-RAG tools. Update as more runs happen.
 
 ## What this harness measures
 
@@ -20,14 +29,29 @@ tool selection while containing a real factual error a user could act on badly
 (see "The Boone trip question" below), and single-tool-call correctness alone
 would never have caught it.
 
+A third, narrower check exists for the handful of RAG questions with an
+objectively checkable answer: **`fact_score`**, from `grade_facts()`,
+deterministic like `tool_score` but checking the *answer text* against a
+known ground truth (a specific office code, an ordered chain of offices)
+rather than the tool calls. See `FINDINGS_RAG.md`'s "`quality_score` is not
+reliable enough to stand alone on checkable questions" for why this exists
+-- it isn't a general replacement for `quality_score`, most questions don't
+have an answer this checkable.
+
 ## Architecture
 
-- `questions.py` -- the shared question set (12 questions as of this writing),
-  each with an `expected_calls` list describing acceptable tool-call
-  strategies. Shared by both backends so results are comparable regardless of
-  how the model was invoked.
-- `grading.py` -- pure, deterministic grading logic (`grade_question`), fully
-  unit-tested (`test_grading.py`, 11 tests) with no network calls.
+- `questions_mcp.py` / `questions_rag.py` -- the question set (32 total: 16
+  original non-RAG questions, 16 exercising `search_forecast_history`/
+  `explain_forecast_reasoning`), each with an `expected_calls` list describing
+  acceptable tool-call strategies, and optionally an `expected_facts` dict for
+  questions with a checkable answer. Split into two files (was one
+  `questions.py`) so a retry scoped to one tool family doesn't re-spend usage
+  re-testing the other; `select_questions()` in `run_eval.py` picks one, the
+  other, or both via `--question-set`. Shared by both backends so results are
+  comparable regardless of how the model was invoked.
+- `grading.py` -- pure, deterministic grading logic (`grade_question` for
+  tool calls, `grade_facts` for answer-text ground truth), fully unit-tested
+  (`test_grading.py`, 18 tests) with no network calls.
 - `run_eval.py` -- the harness itself, with two backends:
   - `--backend headless` (default): shells out to `claude -p`, billed against
     the operator's Claude subscription. Cost figures here are the CLI's
@@ -96,6 +120,12 @@ run (and its cost) was lost to one stray formatting choice. Fixed with
 requiring an exact match -- covered by `test_run_eval.py`. Any harness that
 parses a "just give me a number" LLM response needs to assume it won't always
 get exactly that.
+
+RAG-specific counterparts to this section -- `quality_score` unreliability on
+the two checkable RAG questions, the harness bugs the RAG questions
+surfaced, and the retrieval-recall findings from a clean RAG-only run -- all
+moved to [`FINDINGS_RAG.md`](FINDINGS_RAG.md) to keep this document scoped
+to the original six tools and the shared harness.
 
 ## Real server bugs the eval process surfaced
 
@@ -206,7 +236,7 @@ for the week version -- consistently low in both cases, unlike the earlier
 demonstrated judge-variance example. That's a meaningful data point in the
 judge's favor: for a clear-cut fabrication, the judge's noise band narrows and
 it converges on "bad" reliably, even though it's unreliable on more borderline
-quality calls (see "LLM judge variance" above). `questions.py` keeps the
+quality calls (see "LLM judge variance" above). `questions_mcp.py` keeps the
 "this week or next week" phrasing as the canonical test since it isolates the
 fabrication without the day-of-week confound.
 

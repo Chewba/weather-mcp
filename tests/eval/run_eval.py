@@ -4,14 +4,23 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import anthropic
 from config import MODEL_JUDGE, MODEL_UNDER_TEST
-from grading import grade_question
+from grading import grade_facts, grade_question
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from questions import TESTING_DATA
+from questions_mcp import MCP_QUESTIONS
+from questions_rag import RAG_QUESTIONS
+
+# Windows' stdout/stderr default to the console codepage (e.g. cp1252), not
+# UTF-8, even when redirected to a file -- tool data and model answers can
+# contain arbitrary Unicode (arrows, smart quotes, degree signs), so a plain
+# print() of either crashes with UnicodeEncodeError the moment one shows up.
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_SERVER_PARAMS = {
@@ -19,10 +28,36 @@ MCP_SERVER_PARAMS = {
     "args": ["run", "--directory", str(REPO_ROOT), "weather-mcp"],
 }
 
-ALLOWED_TOOLS = (
+# scripts/ isn't a package under src/, so it's not importable via the normal
+# weather_mcp namespace -- add it to sys.path the same way this file already
+# relies on its own directory being on sys.path for `from config import ...`.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from seed_db import seed as seed_corpus
+
+# Scoped per question-set rather than one shared allow-list: MCP_QUESTIONS
+# legitimately need get_weather_discussion/compare_forecasts, but no
+# RAG_QUESTIONS expected_calls ever call for those (verified against
+# questions_rag.py) -- yet get_weather_discussion pulls a full live AFD
+# product (multi-KB), and that raw text gets embedded verbatim in the judge
+# prompt (build_judge_prompt) and re-sent once per --judge-samples. Handing
+# the model access to it during RAG-only questions burned real usage on
+# nothing the RAG tools were even being tested for.
+MCP_TOOLS = (
     "mcp__weather__get_daily_forecast,mcp__weather__get_hourly_forecast,"
     "mcp__weather__get_current_conditions,mcp__weather__get_active_alerts,"
     "mcp__weather__get_weather_discussion,mcp__weather__compare_forecasts"
+)
+RAG_TOOLS = (
+    "mcp__weather__search_forecast_history,mcp__weather__explain_forecast_reasoning"
+)
+# Headless `claude -p` runs as a full coding agent in REPO_ROOT, not a
+# sandbox limited to the MCP tools above -- confirmed live when
+# search_forecast_history errored (DB connection refused) and the model
+# fell back to Read-ing tests/eval/questions_rag.py's answer key straight
+# off disk and reciting it, scoring a perfect (and meaningless) fact_score.
+# --allowedTools only pre-approves the MCP tools; it does not deny these.
+DISALLOWED_BUILTIN_TOOLS = (
+    "Read,Grep,Glob,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Task"
 )
 JUDGE_SAMPLES = 3
 JUDGE_PROMPT_TEMPLATE = (
@@ -39,6 +74,20 @@ PRICING_PER_MTOK_USD = {
     "claude-haiku-4-5": (1.00, 5.00),
     "claude-sonnet-5": (3.00, 15.00),
 }
+
+
+def select_questions(question_set: str) -> list[tuple[dict, str]]:
+    """Pairs each question with the tool allow-list it should run under, so
+    a --question-set both run still scopes RAG questions away from
+    get_weather_discussion/compare_forecasts (and vice versa) per-question,
+    not just for pure single-set runs."""
+    if question_set == "mcp":
+        return [(q, MCP_TOOLS) for q in MCP_QUESTIONS]
+    if question_set == "rag":
+        return [(q, RAG_TOOLS) for q in RAG_QUESTIONS]
+    return [(q, MCP_TOOLS) for q in MCP_QUESTIONS] + [
+        (q, RAG_TOOLS) for q in RAG_QUESTIONS
+    ]
 
 # ---------------------------------------------------------------------------
 # Shared: judge prompt construction, score averaging, cost reporting -- used
@@ -69,11 +118,15 @@ def build_judge_prompt(answer: dict) -> str:
 
 
 def build_rating(
-    answer: dict, expected_calls: list[dict], scores: list[int], judge_cost_usd: float
+    answer: dict,
+    expected_calls: list[dict],
+    scores: list[int],
+    judge_cost_usd: float,
+    expected_facts: dict | None = None,
 ) -> dict:
     quality_score = round(sum(scores) / len(scores))
     print("\nai ratings", scores, "-> averaged", quality_score)
-    return {
+    rating = {
         "tool_calls": answer["tool_calls"],
         "tool_score": grade_question(answer["tool_calls"], expected_calls),
         "quality_scores": scores,
@@ -81,6 +134,14 @@ def build_rating(
         "model_cost_usd": answer["cost_usd"],
         "judge_cost_usd": judge_cost_usd,
     }
+    if expected_facts:
+        # Deterministic ground-truth check, only for questions with an
+        # objectively checkable answer -- see grade_facts' docstring for why
+        # this exists alongside (not instead of) quality_score.
+        fact_score = grade_facts(answer["final_answer"], expected_facts)
+        rating["fact_score"] = fact_score
+        print("fact_score:", fact_score)
+    return rating
 
 
 def print_cost_summary(
@@ -110,17 +171,33 @@ def print_cost_summary(
         )
 
 
+def print_fact_summary(fact_results: list[tuple[str, int]]) -> None:
+    """Ground-truth fact checks, separate from the cost/quality summary above
+    since they only apply to the handful of questions with an objectively
+    checkable answer -- see grade_facts' docstring."""
+    if not fact_results:
+        return
+    print("\n--- Ground-truth fact checks (deterministic, not judge-scored) ---")
+    for question, score in fact_results:
+        print(f"  {score:>2}  {question}")
+
+
 # ---------------------------------------------------------------------------
 # Headless backend: shells out to `claude -p`, billed against the caller's
 # Claude subscription rather than ANTHROPIC_API_KEY.
 # ---------------------------------------------------------------------------
 
 
-def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
+def run_claude(
+    prompt: str, model: str, use_mcp: bool, allowed_tools: str = MCP_TOOLS + "," + RAG_TOOLS
+) -> list[dict]:
+    # Prompt is piped via stdin rather than passed as a CLI argument -- the
+    # judge prompt embeds full raw tool output (e.g. search_forecast_history
+    # can return several KB of AFD passages), which blew past Windows'
+    # command-line length limit (WinError 206) when passed as argv.
     cmd = [
         "claude",
         "-p",
-        prompt,
         "--model",
         model,
         "--output-format",
@@ -134,9 +211,13 @@ def run_claude(prompt: str, model: str, use_mcp: bool) -> list[dict]:
             mcp_config,
             "--strict-mcp-config",
             "--allowedTools",
-            ALLOWED_TOOLS,
+            allowed_tools,
+            "--disallowedTools",
+            DISALLOWED_BUILTIN_TOOLS,
         ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd, input=prompt, capture_output=True, text=True, encoding="utf-8", check=False
+    )
     if result.returncode != 0:
         raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr}")
     return [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
@@ -198,8 +279,8 @@ def extract_cost_usd(events: list[dict]) -> float:
     return 0.0
 
 
-def run_question_headless(model: str, question: str) -> dict:
-    events = run_claude(question, model, use_mcp=True)
+def run_question_headless(model: str, question: str, allowed_tools: str) -> dict:
+    events = run_claude(question, model, use_mcp=True, allowed_tools=allowed_tools)
     calls = extract_weather_tool_calls(events)
     tool_responses = [
         extract_tool_result(events, tool_use_id) for _, _, tool_use_id in calls
@@ -227,22 +308,32 @@ def judge_headless(
 def run_headless_batch(args) -> None:
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
-    n = len(TESTING_DATA)
+    fact_results = []
+    questions = select_questions(args.question_set)
+    n = len(questions)
 
-    for quest in TESTING_DATA:
-        answer = run_question_headless(args.model, quest["question"])
+    for quest, allowed_tools in questions:
+        answer = run_question_headless(args.model, quest["question"], allowed_tools)
         print(f"\n{quest['question']} DONE")
         judge_prompt = build_judge_prompt(answer)
         print("\nRating Prompt", judge_prompt)
         scores, judge_cost = judge_headless(
             args.judge_model, judge_prompt, args.judge_samples
         )
-        rating = build_rating(answer, quest["expected_calls"], scores, judge_cost)
+        rating = build_rating(
+            answer,
+            quest["expected_calls"],
+            scores,
+            judge_cost,
+            expected_facts=quest.get("expected_facts"),
+        )
         print(rating)
         total_model_cost += rating["model_cost_usd"]
         total_judge_cost += rating["judge_cost_usd"]
         total_tool_score += rating["tool_score"]
         total_quality_score += rating["quality_score"]
+        if "fact_score" in rating:
+            fact_results.append((quest["question"], rating["fact_score"]))
 
     print_cost_summary(
         args,
@@ -254,6 +345,7 @@ def run_headless_batch(args) -> None:
         "NOTE: these are the CLI's estimated API-equivalent prices, billed against your\n"
         "subscription rather than charged per-call -- a relative cost signal, not a real charge.",
     )
+    print_fact_summary(fact_results)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +437,9 @@ async def run_api_batch(args) -> None:
 
     total_model_cost = total_judge_cost = 0.0
     total_tool_score = total_quality_score = 0
-    n = len(TESTING_DATA)
+    fact_results = []
+    questions = select_questions(args.question_set)
+    n = len(questions)
 
     async with (
         stdio_client(params) as (read, write),
@@ -353,7 +447,7 @@ async def run_api_batch(args) -> None:
     ):
         await session.initialize()
         tools = await session.list_tools()
-        anthropic_tools = [
+        all_anthropic_tools = [
             {
                 "name": t.name,
                 "description": t.description,
@@ -362,7 +456,19 @@ async def run_api_batch(args) -> None:
             for t in tools.tools
         ]
 
-        for quest in TESTING_DATA:
+        for quest, allowed_tools in questions:
+            # allowed_tools carries the claude-CLI-style "mcp__weather__x"
+            # names (shared with the headless backend); the raw MCP session
+            # here exposes tools under their bare name, so strip the prefix
+            # before filtering -- see MCP_TOOLS/RAG_TOOLS above for why this
+            # scoping exists at all.
+            allowed_names = {
+                name.removeprefix("mcp__weather__")
+                for name in allowed_tools.split(",")
+            }
+            anthropic_tools = [
+                t for t in all_anthropic_tools if t["name"] in allowed_names
+            ]
             answer = await run_question_api(
                 client, session, anthropic_tools, args.model, quest["question"]
             )
@@ -372,12 +478,20 @@ async def run_api_batch(args) -> None:
             scores, judge_cost = judge_api(
                 client, args.judge_model, judge_prompt, args.judge_samples
             )
-            rating = build_rating(answer, quest["expected_calls"], scores, judge_cost)
+            rating = build_rating(
+                answer,
+                quest["expected_calls"],
+                scores,
+                judge_cost,
+                expected_facts=quest.get("expected_facts"),
+            )
             print(rating)
             total_model_cost += rating["model_cost_usd"]
             total_judge_cost += rating["judge_cost_usd"]
             total_tool_score += rating["tool_score"]
             total_quality_score += rating["quality_score"]
+            if "fact_score" in rating:
+                fact_results.append((quest["question"], rating["fact_score"]))
 
     print_cost_summary(
         args,
@@ -389,9 +503,18 @@ async def run_api_batch(args) -> None:
         "NOTE: these figures are computed from actual token usage x list pricing above --\n"
         "this backend bills ANTHROPIC_API_KEY for real, unlike the headless backend.",
     )
+    print_fact_summary(fact_results)
 
 
 def main(args) -> None:
+    if args.skip_seed:
+        print("\nSkipping RAG corpus seeding (--skip-seed) -- running against whatever's already in the DB.")
+    elif args.question_set == "mcp":
+        print("\nSkipping RAG corpus seeding -- --question-set mcp doesn't touch the RAG corpus.")
+    else:
+        print(f"\nSeeding RAG corpus (mode={args.corpus_mode})...")
+        asyncio.run(seed_corpus(strict=args.corpus_mode == "strict"))
+
     if args.backend == "api":
         asyncio.run(run_api_batch(args))
     else:
@@ -415,5 +538,37 @@ if __name__ == "__main__":
         "--judge-samples",
         type=int,
         default=int(os.environ.get("JUDGE_SAMPLES", JUDGE_SAMPLES)),
+    )
+    parser.add_argument(
+        "--question-set",
+        choices=["mcp", "rag", "both"],
+        default=os.environ.get("EVAL_QUESTION_SET", "both"),
+        help=(
+            "mcp: only the original, non-RAG tool questions (no DB seeding). "
+            "rag: only the RAG retrieval-tool questions. both: all questions "
+            "(default) -- keep the sets separate when you only need to re-run "
+            "one, so a retry doesn't re-spend usage re-testing the other."
+        ),
+    )
+    parser.add_argument(
+        "--corpus-mode",
+        choices=["strict", "drift"],
+        default=os.environ.get("EVAL_CORPUS_MODE", "drift"),
+        help=(
+            "strict: reset the DB and seed only the golden fixture, for a "
+            "reproducible RAG-tool corpus. drift: seed the golden fixture as a "
+            "floor, then layer in the 10 most recent live discussions per "
+            "office on top, without resetting existing data."
+        ),
+    )
+    parser.add_argument(
+        "--skip-seed",
+        action="store_true",
+        default=os.environ.get("EVAL_SKIP_SEED", "").lower() in ("1", "true", "yes"),
+        help=(
+            "Skip corpus seeding entirely and run against whatever's already "
+            "in the DB -- useful when iterating on harness bugs without "
+            "paying the reseed cost (and its HF Hub calls) on every retry."
+        ),
     )
     main(parser.parse_args())

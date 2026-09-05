@@ -7,6 +7,7 @@ from weather_mcp import nws
 from weather_mcp.config import USER_AGENT
 from weather_mcp.rag.chunking import parse_chunks
 from weather_mcp.rag.db import (
+    filter_new_chunks,
     get_discussion,
     get_office,
     get_pool,
@@ -35,7 +36,9 @@ async def ingest_discussion(raw_text:dict, office_id:str, source:str = "live_cap
     discussion_data['source'] = source
     discussion_data['product_id'] = await set_discussion(pool, discussion_data)
     discussion_data = parse_chunks(discussion_data, office_data)
-    await upsert_discussion_chunk(pool, discussion_data)
+    discussion_data = await filter_new_chunks(pool, discussion_data)
+    if discussion_data:
+        await upsert_discussion_chunk(pool, discussion_data)
 
 
 async def get_office_nws(office_id:str) -> dict:

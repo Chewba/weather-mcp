@@ -77,3 +77,44 @@ def grade_question(actual_calls: list[tuple[str, dict]], strategies: list[dict])
 
     unexpected = len(actual_calls) - len(used)
     return max(score - UNEXPECTED_CALL_PENALTY * (unexpected + extra_calls), 0)
+
+
+def grade_facts(final_answer: str, expected_facts: dict) -> int:
+    """Deterministic, ground-truth-based check against the model's final
+    answer text. Complements quality_score for questions with an objectively
+    checkable answer (a specific office code, a chain of offices in order) --
+    the LLM judge has been observed scoring a checkably-wrong answer highly
+    and a checkably-correct one poorly on the same kind of question, so a
+    text-level fact check is a more reliable signal than the judge alone for
+    these questions specifically. Only meaningful for questions that define
+    `expected_facts`; not a replacement for quality_score in general, since
+    most questions don't have an answer this checkable.
+
+    `must_mention`: {fact: points} -- points awarded if `fact` (case-
+    insensitive) appears anywhere in the answer.
+
+    `ordered_sequence`: a list of facts expected to appear in this relative
+    order. Each one found (regardless of order) earns `sequence_item_points`
+    (default 1); an `order_bonus` (default 0) is added if every found item
+    appears in the correct relative order (missing items don't break this --
+    a 6-of-7 chain found in the right order still earns the bonus).
+    """
+    text = final_answer.lower()
+    score = 0
+
+    for fact, points in expected_facts.get("must_mention", {}).items():
+        if fact.lower() in text:
+            score += points
+
+    ordered = expected_facts.get("ordered_sequence")
+    if ordered:
+        item_points = expected_facts.get("sequence_item_points", 1)
+        order_bonus = expected_facts.get("order_bonus", 0)
+        positions = [(item, text.find(item.lower())) for item in ordered]
+        found = [(item, pos) for item, pos in positions if pos != -1]
+        score += len(found) * item_points
+        found_positions = [pos for _, pos in found]
+        if len(found) > 1 and found_positions == sorted(found_positions):
+            score += order_bonus
+
+    return score
