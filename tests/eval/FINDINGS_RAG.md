@@ -860,3 +860,32 @@ parenthetical-header format (e.g. a KLOX-scoped query) would be needed to
 show this fix's effect on a recall@k number directly; not built here, since
 that would mean hand-verifying a new ground-truth set the same way the
 existing two cases were.
+
+**But the actual eval-harness `expected_facts` questions moved, and moved
+a lot -- a targeted, budget-conscious rerun (not the full 16-question set;
+just the 3 questions with deterministic fact checks, via `run_eval.py`'s
+new `--filter` flag, ~$1.09 total vs. ~$2-2.5 for a full run):**
+
+| question | fact_score before this fix | fact_score after |
+|---|---|---|
+| origin-office ("which office first reported...") | 0 (docstring-only run) / 10 (adaptive-retrieval run, but a **false positive** -- see the v3 section above, it named KMEG, the wrong office) | **10 -- genuinely correct this time**, explicitly names KFWD as first |
+| full-chain ("list, in order, every office...") | 5 (docstring-only) / 6 (adaptive-retrieval) | **10** -- all 7 correct offices, correct relative order |
+| trace ("trace, in chronological order...") | no prior run of this exact question | 6 -- missed KFWD entirely (made only 1 search call this run, vs. 3 for the full-chain question above) |
+
+Two of three now score a perfect 10, and the origin-office answer this time
+is a real correctness win, not a metric artifact like the adaptive-retrieval
+run's false-positive 10 -- the model's own answer text now correctly
+identifies KFWD by name as the first office, instead of naming KMEG and
+only mentioning KFWD in passing. The same confounding caveat from the v3
+section still applies here (the model's tool-call count and wording vary
+run to run, independent of any single code change, as seen directly in the
+trace question making only 1 call this run vs. 3 for the structurally
+similar full-chain question) -- so this isn't proof the chunking fix alone
+caused the jump. But it's a strong, encouraging signal, and there's a
+plausible mechanism even though the recall@k case above showed no effect:
+the chunking fixes removed garbage chunks corpus-wide (not just on KLOX),
+so when the model's own multi-query strategy happens to touch office/date
+ranges the old chunker had polluted, fewer of its self-chosen `top_k` slots
+get spent on footer-attribution noise -- a benefit `recall_at_k.py`'s one
+fixed query wouldn't necessarily surface, but a model making several
+differently-worded calls plausibly would.
